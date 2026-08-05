@@ -106,21 +106,21 @@ impl Default for TerminalExecuteTool {
 
 #[async_trait]
 impl Tool for TerminalExecuteTool {
-    fn name(&self) -> &'static str {
-        "terminal_execute"
+    fn name(&self) -> String {
+        "terminal_execute".into()
     }
 
     fn category(&self) -> ToolCategory {
         ToolCategory::Exec
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> String {
         "在指定主机上执行一条 shell 命令，返回退出码、标准输出与标准错误。\
          这是你的主要手段 —— 直接写 shell 命令，不要期待存在更高层的封装工具。\
          优先使用机器可读输出（ip -j addr / systemctl show / journalctl -o json / df -P / lsblk -J / ss -H），\
          它们更省 token 也更好解析。需要长时间运行的任务不要用本工具。\
          命令会经过策略判定：部分命令自动执行，部分需要用户确认或指纹，\
-         少数不可逆的命令被硬禁止 —— 被禁止时不要尝试变形绕过，直接告诉用户需要人工执行。"
+         少数不可逆的命令被硬禁止 —— 被禁止时不要尝试变形绕过，直接告诉用户需要人工执行。".into()
     }
 
     fn parameters(&self) -> serde_json::Value {

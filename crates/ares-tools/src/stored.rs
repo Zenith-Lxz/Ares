@@ -25,18 +25,19 @@ pub struct ReadStoredOutputTool;
 
 #[async_trait]
 impl Tool for ReadStoredOutputTool {
-    fn name(&self) -> &'static str {
-        "read_stored_output"
+    fn name(&self) -> String {
+        "read_stored_output".into()
     }
 
     fn category(&self) -> ToolCategory {
         ToolCategory::Read
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> String {
         "取回此前因过大而被截断的完整输出的一段。\
          当某次命令返回中出现 ref=xxxx 时，可用本工具按行区间读取。\
          一次不要读太多行 —— 先读一小段定位，再按需精确取。"
+            .into()
     }
 
     fn parameters(&self) -> serde_json::Value {

@@ -1,5 +1,6 @@
 mod cli;
 mod gui;
+mod mcp;
 mod repl;
 
 use anyhow::{Context, Result};
@@ -10,7 +11,7 @@ use ares_core::{paths, AresError, HostId};
 use ares_exec::{Executor, LocalExecutor};
 use ares_llm::{AnthropicProvider, OpenAiProvider, Provider, ProviderKind, ProvidersConfig};
 use ares_policy::{PolicyConfig, PolicyEngine};
-use ares_tools::{default_registry, ToolContext};
+use ares_tools::{default_registry, Tool, ToolContext};
 use clap::Parser;
 use cli::{AuditAction, Cli, Command, ProviderAction};
 use std::sync::Arc;
@@ -174,6 +175,7 @@ async fn cmd_chat() -> Result<()> {
         vec![HostId::localhost()],
         Arc::new(LocalExecutor::new()),
         Arc::new(CliApprover::new()),
+        vec![],
     )
     .await?;
     repl::run(agent).await?;
@@ -189,6 +191,7 @@ pub(crate) async fn build_agent(
     scope: Vec<HostId>,
     executor: Arc<dyn Executor>,
     approver: Arc<dyn Approver>,
+    extra_tools: Vec<Arc<dyn Tool>>,
 ) -> Result<AgentLoop> {
     let hosts_cfg = HostsConfig::load()?;
     let policy_cfg = PolicyConfig::load()?;
@@ -214,9 +217,15 @@ pub(crate) async fn build_agent(
 
     let ctx = ToolContext::new(executor, policy, audit, scope, session_id, "agent");
 
+    // MCP 工具等动态工具注入注册表（2026-08-05 批次4）
+    let mut registry = default_registry();
+    for t in extra_tools {
+        registry.register(t);
+    }
+
     Ok(AgentLoop::new(
         provider,
-        default_registry(),
+        registry,
         ctx,
         approver,
         &entry.model,

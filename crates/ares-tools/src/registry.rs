@@ -131,10 +131,10 @@ pub struct ToolSpec {
 
 #[async_trait]
 pub trait Tool: Send + Sync {
-    fn name(&self) -> &'static str;
+    fn name(&self) -> String;
     fn category(&self) -> ToolCategory;
     /// 给 LLM 看的说明。要写清楚何时该用、何时不该用。
-    fn description(&self) -> &'static str;
+    fn description(&self) -> String;
     /// 参数的 JSON Schema，必须是 `{"type":"object", ...}`
     fn parameters(&self) -> serde_json::Value;
 
@@ -142,8 +142,8 @@ pub trait Tool: Send + Sync {
 
     fn spec(&self) -> ToolSpec {
         ToolSpec {
-            name: self.name().to_string(),
-            description: self.description().to_string(),
+            name: self.name(),
+            description: self.description(),
             category: self.category(),
             parameters: self.parameters(),
         }
@@ -152,7 +152,7 @@ pub trait Tool: Send + Sync {
 
 #[derive(Default)]
 pub struct ToolRegistry {
-    tools: BTreeMap<&'static str, Arc<dyn Tool>>,
+    tools: BTreeMap<String, Arc<dyn Tool>>,
 }
 
 impl ToolRegistry {
@@ -171,8 +171,8 @@ impl ToolRegistry {
             .ok_or_else(|| AresError::UnknownTool(name.to_string()))
     }
 
-    pub fn names(&self) -> Vec<&'static str> {
-        self.tools.keys().copied().collect()
+    pub fn names(&self) -> Vec<String> {
+        self.tools.keys().cloned().collect()
     }
 
     /// 全部工具规格。顺序稳定（BTreeMap），保证 prompt 可缓存。
@@ -197,14 +197,14 @@ mod tests {
 
     #[async_trait]
     impl Tool for DummyTool {
-        fn name(&self) -> &'static str {
-            "dummy"
+        fn name(&self) -> String {
+            "dummy".into()
         }
         fn category(&self) -> ToolCategory {
             ToolCategory::Read
         }
-        fn description(&self) -> &'static str {
-            "测试用工具"
+        fn description(&self) -> String {
+            "测试用工具".into()
         }
         fn parameters(&self) -> serde_json::Value {
             json!({"type": "object", "properties": {}, "required": []})

@@ -8,11 +8,13 @@ use crate::gui::exec::{RoutedExecutor, TerminalSessionExecutor};
 use crate::gui::session::{ConnTarget, Session};
 use crate::gui::sftp::SftpPanel;
 use crate::gui::term;
+use crate::mcp::McpManager;
 use ares_agent::{AgentLoop, ApprovalResult, TurnResult};
 use ares_core::config::{HostEntry, HostsConfig};
 use ares_core::ssh_config::{self, SshHost};
 use ares_core::{Decision, Env, HostId};
 use ares_llm::config::{ProviderEntry, ProviderKind, ProvidersConfig};
+use ares_tools::Tool;
 use egui::{Color32, FontFamily, FontId, RichText};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
@@ -156,6 +158,9 @@ pub struct GuiApp {
     history_modal: bool,
     history_preview: Option<Vec<(String, String)>>,
     restore_msgs: Option<Vec<(String, String)>>,
+    /// MCP 工具（批次4：外部 server 工具注入 agent 注册表）。
+    mcp_tools: Vec<Arc<dyn Tool>>,
+    mcp_errors: Vec<String>,
     agent: Option<AgentBridge>,
     rt: Arc<tokio::runtime::Runtime>,
     /// 供读线程触发的重画句柄（Session 构造时使用）。
@@ -194,6 +199,9 @@ impl GuiApp {
         // 主机簿：hosts.toml 独立维护；ssh_config 仅作导入源
         let hosts = HostsConfig::load().map(|c| c.hosts).unwrap_or_default();
         let ssh_imports = ssh_config::load();
+        // MCP：连接配置的 server 并注册其工具（失败记录，不阻塞启动）
+        let mcp = McpManager::load_and_connect(&rt);
+        let mcp_errors = mcp.errors.clone();
         Self {
             hosts,
             ssh_imports,
@@ -217,6 +225,8 @@ impl GuiApp {
             history_modal: false,
             history_preview: None,
             restore_msgs: None,
+            mcp_tools: mcp.tools,
+            mcp_errors,
             agent: None,
             rt,
             egui_ctx: None,
@@ -481,10 +491,13 @@ impl GuiApp {
             // GUI 审批通道
             let (approver, rx) = GuiApprover::pair();
             self.approve_rx = rx;
-            match self
-                .rt
-                .block_on(crate::build_agent(scope, executor, Arc::new(approver)))
-            {
+            let mcp_tools = self.mcp_tools.clone();
+            match self.rt.block_on(crate::build_agent(
+                scope,
+                executor,
+                Arc::new(approver),
+                mcp_tools,
+            )) {
                 Ok(agent) => {
                     let mut bridge = AgentBridge::new(agent);
                     if let Some(msgs) = self.restore_msgs.take() {
@@ -1625,6 +1638,13 @@ impl eframe::App for GuiApp {
             if close {
                 self.history_modal = false;
             }
+        }
+
+        // ── MCP 连接错误提示（一次性）──
+        if !self.mcp_errors.is_empty() {
+            let errs = self.mcp_errors.clone();
+            self.mcp_errors.clear();
+            self.error_toast = Some(format!("MCP 连接失败：\n{}", errs.join("\n")));
         }
 
         // ── 错误 toast（一次性）──

@@ -22,18 +22,19 @@ impl GetEnvironmentTool {
 
 #[async_trait]
 impl Tool for GetEnvironmentTool {
-    fn name(&self) -> &'static str {
-        "get_environment"
+    fn name(&self) -> String {
+        "get_environment".into()
     }
 
     fn category(&self) -> ToolCategory {
         ToolCategory::Read
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> String {
         "获取当前运行环境：可操作的主机清单、每台主机的环境等级、可用工具列表。\
          这应该是你的第一个调用 —— 在此之前不要假设任何主机存在。\
          若返回的主机列表为空，说明当前没有被授权的主机，应告知用户而非继续尝试。"
+            .into()
     }
 
     fn parameters(&self) -> serde_json::Value {
