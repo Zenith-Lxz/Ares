@@ -3,10 +3,17 @@
 //! 每个 tab 一个 `Session`：读线程把 pty 输出喂给 vt100 解析器，
 //! egui 每帧从 `screen()` 克隆当前屏幕渲染；键盘经 `write()` 送进 pty。
 
-use ares_core::ssh_config::SshHost;
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
+
+/// ssh 连接目标（来自 ARES 主机簿，独立于 ssh_config）。
+#[derive(Debug, Clone)]
+pub struct ConnTarget {
+    pub hostname: String,
+    pub user: Option<String>,
+    pub port: Option<u16>,
+}
 
 #[derive(Clone)]
 pub struct Session {
@@ -23,7 +30,10 @@ pub struct Session {
 
 impl Session {
     /// 打开一个 ssh 会话（rows×cols 初始尺寸）。
-    pub fn open(host: &SshHost, rows: u16, cols: u16) -> anyhow::Result<Self> {
+    ///
+    /// `alias` 是 tab 标题；连接参数来自主机簿（hostname/user/port），
+    /// hostname 为空时回退直接用 alias（兼容仅填了别名的条目）。
+    pub fn open(alias: &str, target: &ConnTarget, rows: u16, cols: u16) -> anyhow::Result<Self> {
         let pty_system = native_pty_system();
         let pair = pty_system.openpty(PtySize {
             rows,
@@ -33,7 +43,22 @@ impl Session {
         })?;
 
         let mut cmd = CommandBuilder::new("ssh");
-        cmd.arg(&host.alias);
+        if let Some(p) = target.port {
+            if p != 22 {
+                cmd.arg("-p");
+                cmd.arg(p.to_string());
+            }
+        }
+        let hostname = if target.hostname.is_empty() {
+            alias.to_string()
+        } else {
+            target.hostname.clone()
+        };
+        let dest = match &target.user {
+            Some(u) => format!("{u}@{hostname}"),
+            None => hostname,
+        };
+        cmd.arg(dest);
         let child = pair.slave.spawn_command(cmd)?;
         drop(pair.slave);
 
@@ -64,7 +89,7 @@ impl Session {
         }
 
         Ok(Self {
-            alias: host.alias.clone(),
+            alias: alias.to_string(),
             parser,
             writer: Arc::new(Mutex::new(writer)),
             master: Arc::new(Mutex::new(pair.master)),

@@ -49,6 +49,37 @@ pub struct HostEntry {
     pub maintenance_window: String,
     #[serde(default)]
     pub probe: Probe,
+    // ── 连接信息（2026-08-05 主机簿独立维护：hosts.toml 是唯一事实源，
+    //    ssh_config 仅作一次性导入源）──
+    /// 连接地址 / IP；缺省用 host 键名
+    #[serde(default)]
+    pub hostname: String,
+    /// ssh 用户名；缺省用当前用户（ssh 默认）
+    #[serde(default)]
+    pub user: String,
+    /// 端口；缺省 22
+    #[serde(default)]
+    pub port: Option<u16>,
+}
+
+impl HostEntry {
+    /// 连接目标：`[user@]hostname[:port]`（用于 ssh 命令构造）。
+    pub fn connect_target(&self, key: &str) -> String {
+        let hostname = if self.hostname.is_empty() {
+            key.to_string()
+        } else {
+            self.hostname.clone()
+        };
+        let base = if self.user.is_empty() {
+            hostname
+        } else {
+            format!("{}@{}", self.user, hostname)
+        };
+        match self.port {
+            Some(p) if p != 22 => format!("{base} -p {p}"),
+            _ => base,
+        }
+    }
 }
 
 /// `hosts.toml` 的完整内容。
@@ -101,6 +132,31 @@ impl HostsConfig {
             .filter(|(_, e)| e.tags.iter().any(|t| t == tag) || e.env.to_string() == tag)
             .map(|(name, _)| HostId::new(name.clone()))
             .collect()
+    }
+
+    /// 保存到默认位置（`~/.config/ares/hosts.toml`）。
+    pub fn save(&self) -> Result<()> {
+        self.save_to(paths::config_dir().join("hosts.toml"))
+    }
+
+    pub fn save_to(&self, path: impl AsRef<Path>) -> Result<()> {
+        let path = path.as_ref();
+        let text = toml::to_string_pretty(self)
+            .map_err(|e| AresError::Config(format!("序列化 hosts.toml 失败：{e}")))?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                AresError::Config(format!("无法创建目录 {}: {e}", parent.display()))
+            })?;
+        }
+        std::fs::write(path, text)
+            .map_err(|e| AresError::Config(format!("无法写入 {}: {e}", path.display())))
+    }
+
+    /// 插入/更新一台主机（键名 = 别名）。返回是否新增。
+    pub fn upsert(&mut self, key: String, entry: HostEntry) -> bool {
+        let is_new = !self.hosts.contains_key(&key);
+        self.hosts.insert(key, entry);
+        is_new
     }
 }
 
@@ -210,5 +266,80 @@ env = "dev"
         let f = write_temp("[hosts.broken\n");
         let err = HostsConfig::load_from(f.path()).unwrap_err();
         assert!(err.to_string().contains("解析"));
+    }
+
+    #[test]
+    fn connect_target_uses_hostname_user_port() {
+        let e = HostEntry {
+            hostname: "10.8.8.83".into(),
+            user: "root".into(),
+            port: Some(22022),
+            ..Default::default()
+        };
+        assert_eq!(e.connect_target("ignored"), "root@10.8.8.83 -p 22022");
+    }
+
+    #[test]
+    fn connect_target_falls_back_to_key_and_defaults() {
+        let e = HostEntry::default();
+        assert_eq!(e.connect_target("my-alias"), "my-alias");
+        let e2 = HostEntry {
+            hostname: "1.2.3.4".into(),
+            ..Default::default()
+        };
+        assert_eq!(e2.connect_target("x"), "1.2.3.4");
+        let e3 = HostEntry {
+            user: "ops".into(),
+            port: Some(22),
+            ..Default::default()
+        };
+        assert_eq!(e3.connect_target("y"), "ops@y");
+    }
+
+    #[test]
+    fn save_roundtrip_preserves_hosts() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hosts.toml");
+        let mut cfg = HostsConfig::default();
+        cfg.upsert(
+            "prod-web".into(),
+            HostEntry {
+                hostname: "10.8.8.83".into(),
+                user: "root".into(),
+                port: Some(22022),
+                env: Env::Prod,
+                tags: vec!["web".into()],
+                ..Default::default()
+            },
+        );
+        cfg.save_to(&path).unwrap();
+
+        let loaded = HostsConfig::load_from(&path).unwrap();
+        let e = &loaded.hosts["prod-web"];
+        assert_eq!(e.hostname, "10.8.8.83");
+        assert_eq!(e.user, "root");
+        assert_eq!(e.port, Some(22022));
+        assert_eq!(e.env, Env::Prod);
+    }
+
+    #[test]
+    fn upsert_reports_new_vs_update() {
+        let mut cfg = HostsConfig::default();
+        assert!(cfg.upsert("a".into(), HostEntry::default()));
+        assert!(!cfg.upsert("a".into(), HostEntry::default()));
+    }
+
+    #[test]
+    fn old_style_hosts_without_connection_fields_still_parse() {
+        // 兼容：旧 hosts.toml（无 hostname/user/port）解析后字段为空/None
+        let f = tempfile::tempdir().unwrap();
+        let path = f.path().join("hosts.toml");
+        std::fs::write(&path, "[hosts.legacy]\nenv = \"dev\"\n").unwrap();
+        let cfg = HostsConfig::load_from(&path).unwrap();
+        let e = &cfg.hosts["legacy"];
+        assert_eq!(e.hostname, "");
+        assert_eq!(e.user, "");
+        assert_eq!(e.port, None);
+        assert_eq!(e.env, Env::Dev);
     }
 }

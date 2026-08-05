@@ -5,19 +5,34 @@
 
 use crate::gui::approver::{GuiApprover, PendingApproval};
 use crate::gui::exec::TerminalSessionExecutor;
-use crate::gui::session::Session;
+use crate::gui::session::{ConnTarget, Session};
 use crate::gui::term;
 use ares_agent::{AgentLoop, ApprovalResult, TurnResult};
+use ares_core::config::{HostEntry, HostsConfig};
 use ares_core::ssh_config::{self, SshHost};
-use ares_core::Decision;
+use ares_core::{Decision, Env};
 use egui::{Color32, FontFamily, FontId, RichText};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 
 const MONO: FontId = FontId::monospace(14.0);
 
+/// 「添加主机」弹窗的表单字段。
+#[derive(Default)]
+struct AddHostFields {
+    name: String,
+    hostname: String,
+    user: String,
+    port: String,
+    env: String,
+    tags: String,
+}
+
 pub struct GuiApp {
-    hosts: Vec<SshHost>,
+    /// ARES 主机簿（hosts.toml 独立维护，2026-08-05 起不再直接读 ssh_config）。
+    hosts: std::collections::BTreeMap<String, HostEntry>,
+    /// 导入源：ssh_config 主机（一次性导入进主机簿）。
+    ssh_imports: Vec<SshHost>,
     tabs: Vec<Session>,
     active: usize,
     /// 当前 tab 的终端尺寸（用于 resize 检测）。
@@ -25,6 +40,10 @@ pub struct GuiApp {
     picking: bool,
     filter: String,
     filter_selected: Option<usize>,
+    add_modal: bool,
+    add_fields: AddHostFields,
+    import_modal: bool,
+    import_selected: std::collections::BTreeSet<String>,
     agent_open: bool,
     agent: Option<AgentBridge>,
     rt: Arc<tokio::runtime::Runtime>,
@@ -49,14 +68,22 @@ enum AgentEvent {
 impl GuiApp {
     pub fn new(cc: &eframe::CreationContext<'_>, rt: Arc<tokio::runtime::Runtime>) -> Self {
         install_fonts(&cc.egui_ctx);
+        // 主机簿：hosts.toml 独立维护；ssh_config 仅作导入源
+        let hosts = HostsConfig::load().map(|c| c.hosts).unwrap_or_default();
+        let ssh_imports = ssh_config::load();
         Self {
-            hosts: ssh_config::load(),
+            hosts,
+            ssh_imports,
             tabs: Vec::new(),
             active: 0,
             last_size: None,
             picking: true, // 启动即打开主机选择
             filter: String::new(),
             filter_selected: None,
+            add_modal: false,
+            add_fields: AddHostFields::default(),
+            import_modal: false,
+            import_selected: std::collections::BTreeSet::new(),
             agent_open: false,
             agent: None,
             rt,
@@ -65,16 +92,45 @@ impl GuiApp {
         }
     }
 
-    /// 打开一个会话 tab。
-    fn open_tab(&mut self, host: &SshHost) {
-        match Session::open(host, 24, 80) {
+    /// 打开一个会话 tab（主机簿条目 → 连接参数）。
+    fn open_tab(&mut self, key: &str) {
+        let Some(entry) = self.hosts.get(key).cloned() else {
+            eprintln!("主机簿中没有 {key}");
+            return;
+        };
+        let target = ConnTarget {
+            hostname: entry.hostname.clone(),
+            user: if entry.user.is_empty() {
+                None
+            } else {
+                Some(entry.user.clone())
+            },
+            port: entry.port,
+        };
+        match Session::open(key, &target, 24, 80) {
             Ok(s) => {
                 self.tabs.push(s);
                 self.active = self.tabs.len() - 1;
                 self.picking = false;
             }
-            Err(e) => eprintln!("无法打开 {}：{e}", host.alias),
+            Err(e) => eprintln!("无法打开 {key}：{e}"),
         }
+    }
+
+    /// 保存主机簿到 hosts.toml（失败仅告警，不打断 GUI）。
+    fn save_hosts(&self) {
+        let cfg = HostsConfig {
+            hosts: self.hosts.clone(),
+        };
+        if let Err(e) = cfg.save() {
+            eprintln!("保存主机簿失败：{e}");
+        }
+    }
+
+    /// 新增/更新主机并落盘。
+    fn add_host(&mut self, key: String, entry: HostEntry) {
+        self.hosts.insert(key, entry);
+        self.save_hosts();
     }
 
     /// 关闭当前 tab。
@@ -445,49 +501,55 @@ impl eframe::App for GuiApp {
         // ── 主机选择弹窗 ──
         if self.picking {
             let mut close = false;
+            let mut open_add = false;
+            let mut open_import = false;
             egui::Window::new("选择主机")
-                .default_size([420.0, 420.0])
+                .default_size([460.0, 440.0])
                 .collapsible(false)
                 .resizable(true)
                 .show(ctx, |ui| {
-                    ui.label(
-                        RichText::new(format!("{} 台主机（~/.ssh/config）", self.hosts.len()))
-                            .color(Color32::GRAY),
-                    );
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new(format!("{} 台主机（hosts.toml）", self.hosts.len()))
+                                .color(Color32::GRAY),
+                        );
+                        if ui.button("+ 添加").clicked() {
+                            open_add = true;
+                        }
+                        if ui.button("从 ssh_config 导入").clicked() {
+                            open_import = true;
+                        }
+                    });
                     ui.add(
                         egui::TextEdit::singleline(&mut self.filter)
-                            .hint_text("过滤（主机名 / IP / 用户）")
+                            .hint_text("过滤（名称 / 地址 / 用户）")
                             .desired_width(f32::INFINITY),
                     );
                     ui.separator();
                     let f = self.filter.to_lowercase();
-                    let vis: Vec<usize> = self
+                    let vis: Vec<String> = self
                         .hosts
                         .iter()
-                        .enumerate()
-                        .filter(|(_, h)| {
+                        .filter(|(k, e)| {
                             f.is_empty()
-                                || h.alias.to_lowercase().contains(&f)
-                                || h.hostname.to_lowercase().contains(&f)
+                                || k.to_lowercase().contains(&f)
+                                || e.hostname.to_lowercase().contains(&f)
+                                || e.user.to_lowercase().contains(&f)
                         })
-                        .map(|(i, _)| i)
+                        .map(|(k, _)| k.clone())
                         .collect();
 
                     egui::ScrollArea::vertical()
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
-                            for &i in &vis {
-                                let h = &self.hosts[i];
-                                let target = match &h.user {
-                                    Some(u) => format!("{}@{}", u, h.hostname),
-                                    None => h.hostname.clone(),
-                                };
-                                let label = format!("{}  ·  {}", h.alias, target);
+                            for (i, key) in vis.iter().enumerate() {
+                                let e = &self.hosts[key];
+                                let target = e.connect_target(key);
+                                let label = format!("{key}  ·  {target}");
                                 let row =
                                     ui.selectable_label(self.filter_selected == Some(i), label);
                                 if row.double_clicked() {
-                                    let host = self.hosts[i].clone();
-                                    self.open_tab(&host);
+                                    self.open_tab(key);
                                     close = true;
                                     break;
                                 }
@@ -495,13 +557,184 @@ impl eframe::App for GuiApp {
                                     self.filter_selected = Some(i);
                                 }
                             }
+                            if vis.is_empty() {
+                                ui.label(
+                                    RichText::new(
+                                        "主机簿为空 —— 点「添加」或「从 ssh_config 导入」",
+                                    )
+                                    .color(Color32::GRAY),
+                                );
+                            }
                         });
                     ui.separator();
                     ui.horizontal(|ui| {
                         let connect = ui.button("连接").clicked();
-                        if connect && self.filter_selected.is_some() {
-                            let host = self.hosts[self.filter_selected.unwrap()].clone();
-                            self.open_tab(&host);
+                        if connect
+                            && self.filter_selected.is_some()
+                            && self.filter_selected.unwrap() < vis.len()
+                        {
+                            let key = vis[self.filter_selected.unwrap()].clone();
+                            self.open_tab(&key);
+                            close = true;
+                        }
+                        if ui.button("取消").clicked() {
+                            close = true;
+                        }
+                    });
+                });
+            if open_add {
+                self.add_modal = true;
+            }
+            if open_import {
+                self.import_modal = true;
+                self.import_selected.clear();
+            }
+            if close {
+                self.picking = false;
+            }
+        }
+
+        // ── 添加主机弹窗 ──
+        if self.add_modal {
+            let mut close = false;
+            egui::Window::new("添加主机")
+                .collapsible(false)
+                .resizable(false)
+                .default_size([380.0, 0.0])
+                .show(ctx, |ui| {
+                    let mut f = std::mem::take(&mut self.add_fields);
+                    egui::Grid::new("add_host_grid")
+                        .num_columns(2)
+                        .spacing([8.0, 6.0])
+                        .show(ui, |ui| {
+                            ui.label("名称*");
+                            ui.text_edit_singleline(&mut f.name);
+                            ui.end_row();
+                            ui.label("地址 / IP");
+                            ui.text_edit_singleline(&mut f.hostname);
+                            ui.end_row();
+                            ui.label("用户");
+                            ui.text_edit_singleline(&mut f.user);
+                            ui.end_row();
+                            ui.label("端口");
+                            ui.text_edit_singleline(&mut f.port);
+                            ui.end_row();
+                            ui.label("环境");
+                            ui.text_edit_singleline(&mut f.env);
+                            ui.end_row();
+                            ui.label("标签(逗号分隔)");
+                            ui.text_edit_singleline(&mut f.tags);
+                            ui.end_row();
+                        });
+                    ui.add_space(6.0);
+                    ui.label(
+                        RichText::new("名称必填；地址留空则用名称连接（ssh 别名语义）")
+                            .color(Color32::GRAY),
+                    );
+                    ui.horizontal(|ui| {
+                        if ui.button("保存").clicked() {
+                            let name = f.name.trim().to_string();
+                            if name.is_empty() {
+                                eprintln!("主机名称不能为空");
+                                f = AddHostFields::default();
+                            } else {
+                                let mut entry = HostEntry {
+                                    hostname: f.hostname.trim().to_string(),
+                                    user: f.user.trim().to_string(),
+                                    port: f.port.trim().parse::<u16>().ok(),
+                                    ..Default::default()
+                                };
+                                match f.env.trim().to_lowercase().as_str() {
+                                    "prod" => entry.env = Env::Prod,
+                                    "staging" => entry.env = Env::Staging,
+                                    "dev" => entry.env = Env::Dev,
+                                    "local" => entry.env = Env::Local,
+                                    _ => entry.env = Env::Unknown,
+                                }
+                                entry.tags = f
+                                    .tags
+                                    .split(',')
+                                    .map(|t| t.trim().to_string())
+                                    .filter(|t| !t.is_empty())
+                                    .collect();
+                                let key = name.clone();
+                                self.add_host(key, entry);
+                                close = true;
+                            }
+                        }
+                        if ui.button("取消").clicked() {
+                            close = true;
+                        }
+                    });
+                    self.add_fields = f;
+                });
+            if close {
+                self.add_modal = false;
+            }
+        }
+
+        // ── 从 ssh_config 导入弹窗 ──
+        if self.import_modal {
+            let mut close = false;
+            egui::Window::new("从 ssh_config 导入")
+                .collapsible(false)
+                .default_size([440.0, 400.0])
+                .show(ctx, |ui| {
+                    ui.label(
+                        RichText::new(format!(
+                            "{} 台可导入（勾选后写入主机簿，之后与 ssh_config 无关）",
+                            self.ssh_imports.len()
+                        ))
+                        .color(Color32::GRAY),
+                    );
+                    ui.separator();
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            for h in &self.ssh_imports {
+                                let target = match &h.user {
+                                    Some(u) => format!("{u}@{}", h.hostname),
+                                    None => h.hostname.clone(),
+                                };
+                                let mut label = format!("{}  ·  {target}", h.alias);
+                                if let Some(p) = h.port {
+                                    if p != 22 {
+                                        label = format!("{label} :{p}");
+                                    }
+                                }
+                                if self.hosts.contains_key(&h.alias) {
+                                    label = format!("{label}  ✓已导入");
+                                }
+                                let mut checked = self.import_selected.contains(&h.alias);
+                                if ui.checkbox(&mut checked, label).changed() {
+                                    if checked {
+                                        self.import_selected.insert(h.alias.clone());
+                                    } else {
+                                        self.import_selected.remove(&h.alias);
+                                    }
+                                }
+                            }
+                        });
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        let import = ui
+                            .button(format!("导入 {} 台", self.import_selected.len()))
+                            .clicked();
+                        if import {
+                            let keys: Vec<String> = self.import_selected.iter().cloned().collect();
+                            for k in keys {
+                                if let Some(h) = self.ssh_imports.iter().find(|h| h.alias == k) {
+                                    // 已存在的主机不覆盖（用户手动维护的优先）
+                                    self.hosts.entry(k).or_insert_with(|| HostEntry {
+                                        hostname: h.hostname.clone(),
+                                        user: h.user.clone().unwrap_or_default(),
+                                        port: h.port,
+                                        ..Default::default()
+                                    });
+                                }
+                            }
+                            self.save_hosts();
+                            self.import_selected.clear();
                             close = true;
                         }
                         if ui.button("取消").clicked() {
@@ -510,7 +743,7 @@ impl eframe::App for GuiApp {
                     });
                 });
             if close {
-                self.picking = false;
+                self.import_modal = false;
             }
         }
 
