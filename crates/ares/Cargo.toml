@@ -38,6 +38,8 @@ serde_json.workspace = true
 rmcp = { version = "2.2", features = ["client", "transport-child-process"] }
 serde.workspace = true
 egui_commonmark = "0.19.0"
+plist = "1.7.4"
+toml.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

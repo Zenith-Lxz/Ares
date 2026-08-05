@@ -8,5 +8,6 @@ pub mod russh_exec;
 pub mod session;
 pub mod sftp;
 pub mod term;
+pub mod themes;
 
 pub use app::GuiApp;

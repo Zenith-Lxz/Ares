@@ -2,10 +2,15 @@
 //!
 //! 只画非空 cell（终端大部分区域是空的，跳过即可获得可接受的帧率）；
 //! 256 色映射用标准 ANSI 算法；光标用反色块表示。
+//! 主题化（2026-08-05 批次8）：Default 色 → 主题 fg/bg，ANSI 0-15 → 主题调色板。
 
 use egui::{pos2, Align2, Color32, FontId, Rect, Vec2};
 
+use super::themes::Theme;
+
 /// 标准 16 色（ANSI）。顺序：黑红绿黄蓝紫青白 + 亮色。
+/// 16 色段在渲染层被主题调色板拦截（fg_color/bg_color），此处保持
+/// 标准表供测试与兜底。
 const STANDARD: [Color32; 16] = [
     Color32::from_rgb(0, 0, 0),
     Color32::from_rgb(128, 0, 0),
@@ -25,15 +30,7 @@ const STANDARD: [Color32; 16] = [
     Color32::from_rgb(255, 255, 255),
 ];
 
-/// vt100 颜色 → egui Color32。
-pub fn color(vt: vt100::Color) -> Color32 {
-    match vt {
-        vt100::Color::Default => Color32::GRAY,
-        vt100::Color::Idx(i) => color_256(i),
-        vt100::Color::Rgb(r, g, b) => Color32::from_rgb(r, g, b),
-    }
-}
-
+/// 标准 256 色映射（0-15 用 STANDARD 表；渲染层 0-15 由主题调色板拦截）。
 fn color_256(i: u8) -> Color32 {
     match i {
         0..=15 => STANDARD[i as usize],
@@ -50,7 +47,32 @@ fn color_256(i: u8) -> Color32 {
     }
 }
 
-pub fn draw_terminal(ui: &mut egui::Ui, screen: &vt100::Screen, font: FontId) -> (u16, u16) {
+/// 前景色：Default → 主题 fg；Idx 0-15 → 主题调色板；其余标准 256。
+pub fn fg_color(vt: vt100::Color, theme: &Theme) -> Color32 {
+    match vt {
+        vt100::Color::Default => theme.fg,
+        vt100::Color::Idx(i) if i < 16 => theme.palette[i as usize],
+        vt100::Color::Idx(i) => color_256(i),
+        vt100::Color::Rgb(r, g, b) => Color32::from_rgb(r, g, b),
+    }
+}
+
+/// 背景色：Default → 主题 bg；其余同前景逻辑。
+pub fn bg_color(vt: vt100::Color, theme: &Theme) -> Color32 {
+    match vt {
+        vt100::Color::Default => theme.bg,
+        vt100::Color::Idx(i) if i < 16 => theme.palette[i as usize],
+        vt100::Color::Idx(i) => color_256(i),
+        vt100::Color::Rgb(r, g, b) => Color32::from_rgb(r, g, b),
+    }
+}
+
+pub fn draw_terminal(
+    ui: &mut egui::Ui,
+    screen: &vt100::Screen,
+    font: FontId,
+    theme: &Theme,
+) -> (u16, u16) {
     let (rows, cols) = screen.size();
     let painter = ui.painter();
 
@@ -72,16 +94,22 @@ pub fn draw_terminal(ui: &mut egui::Ui, screen: &vt100::Screen, font: FontId) ->
     // egui 即时模式：每帧全画（上一帧不保留）。静止时由数据驱动
     // repaint 控制（读线程无数据不触发重画 → egui 不重画帧 → 画面保留）。
     for r in 0..rows {
-        draw_row(painter, screen, r, cols, &lay);
+        draw_row(painter, screen, r, cols, &lay, theme);
     }
 
-    // 光标：反色块
+    // 光标：主题色反色块
     let (cr, cc) = cursor;
     if cr < rows && cc < cols {
         let pos = pos2(origin.x + cc as f32 * cell_w, origin.y + cr as f32 * cell_h);
         if let Some(cell) = screen.cell(cr, cc) {
-            let fg = color(cell.fgcolor());
+            let fg = fg_color(cell.fgcolor(), theme);
             painter.rect_filled(Rect::from_min_size(pos, Vec2::new(cell_w, cell_h)), 0.0, fg);
+        } else {
+            painter.rect_filled(
+                Rect::from_min_size(pos, Vec2::new(cell_w, cell_h)),
+                0.0,
+                theme.cursor,
+            );
         }
     }
 
@@ -97,7 +125,14 @@ struct RowLayout {
 }
 
 /// 一行内按「同色连续段」合并绘制（减少 text 调用）。
-fn draw_row(painter: &egui::Painter, screen: &vt100::Screen, r: u16, cols: u16, lay: &RowLayout) {
+fn draw_row(
+    painter: &egui::Painter,
+    screen: &vt100::Screen,
+    r: u16,
+    cols: u16,
+    lay: &RowLayout,
+    theme: &Theme,
+) {
     let base_y = lay.origin.y + r as f32 * lay.cell_h;
     // 整行空（无内容、无背景）快速跳过 —— 终端大部分行是空的
     let mut has_any = false;
@@ -134,10 +169,10 @@ fn draw_row(painter: &egui::Painter, screen: &vt100::Screen, r: u16, cols: u16, 
                     Vec2::new(lay.cell_w * contents.chars().count() as f32, lay.cell_h),
                 ),
                 0.0,
-                color(bg),
+                bg_color(bg, theme),
             );
         }
-        let fg = color(cell.fgcolor());
+        let fg = fg_color(cell.fgcolor(), theme);
         match segments.last_mut() {
             Some((_, text, last_fg)) if *last_fg == fg => text.push_str(&contents),
             _ => segments.push((c, contents, fg)),

@@ -20,7 +20,9 @@ use egui::{Color32, FontFamily, FontId, RichText};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 
-const MONO: FontId = FontId::monospace(14.0);
+fn mono_font(size: f32) -> FontId {
+    FontId::monospace(size)
+}
 
 /// 分割方向。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -175,6 +177,14 @@ pub struct GuiApp {
     plan_items: Vec<PlanItem>,
     /// Agent 回复 markdown 渲染缓存（批次7）
     md_cache: egui_commonmark::CommonMarkCache,
+    /// 终端主题（批次8）
+    theme: crate::gui::themes::Theme,
+    theme_name: String,
+    /// 终端字号（批次8，默认 14）
+    font_size: f32,
+    /// 主题导入路径输入（.itermcolors）
+    theme_import: String,
+    theme_msg: Option<String>,
 }
 
 struct AgentBridge {
@@ -243,6 +253,14 @@ impl GuiApp {
             plan_rx: std::sync::mpsc::channel().1,
             plan_items: Vec::new(),
             md_cache: egui_commonmark::CommonMarkCache::default(),
+            theme: crate::gui::themes::builtin_themes()
+                .into_iter()
+                .next()
+                .unwrap(),
+            theme_name: "Default".into(),
+            font_size: 14.0,
+            theme_import: String::new(),
+            theme_msg: None,
         }
     }
 
@@ -1202,7 +1220,7 @@ impl eframe::App for GuiApp {
                     let n = ws.sessions.len();
                     if n == 1 {
                         // 单 pane：尺寸变化 → resize 会话
-                        let (rows, cols) = term::size_for(ui, &MONO);
+                        let (rows, cols) = term::size_for(ui, &mono_font(self.font_size));
                         if self.last_size != Some((rows, cols))
                             && self.last_resize.elapsed() > std::time::Duration::from_millis(150)
                         {
@@ -1211,7 +1229,7 @@ impl eframe::App for GuiApp {
                             self.last_resize = std::time::Instant::now();
                         }
                         let screen = ws.sessions[0].screen();
-                        term::draw_terminal(ui, &screen, MONO);
+                        term::draw_terminal(ui, &screen, mono_font(self.font_size), &self.theme);
                         // 点击终端空白处：清除输入框焦点，恢复直接输入
                         let tr = ui.available_rect_before_wrap();
                         if ui
@@ -1254,7 +1272,7 @@ impl eframe::App for GuiApp {
                                 } else {
                                     0.0
                                 })));
-                            let (rows, cols) = term::size_for(&child, &MONO);
+                            let (rows, cols) = term::size_for(&child, &mono_font(self.font_size));
                             if ws.last_sizes[i] != Some((rows, cols))
                                 && self.last_resize.elapsed()
                                     > std::time::Duration::from_millis(150)
@@ -1264,7 +1282,12 @@ impl eframe::App for GuiApp {
                                 self.last_resize = std::time::Instant::now();
                             }
                             let screen = s.screen();
-                            term::draw_terminal(&mut child, &screen, MONO);
+                            term::draw_terminal(
+                                &mut child,
+                                &screen,
+                                mono_font(self.font_size),
+                                &self.theme,
+                            );
                         }
                         // 分割线
                         let mid = if is_v {
@@ -1678,6 +1701,67 @@ impl eframe::App for GuiApp {
                     });
                     if let Some(err) = &save_err {
                         ui.colored_label(Color32::from_rgb(220, 90, 90), err);
+                    }
+                    // ── 外观（批次8：iTerm2 化）──
+                    ui.add_space(8.0);
+                    ui.separator();
+                    ui.label(RichText::new("外观").strong());
+                    egui::Grid::new("appearance_grid")
+                        .num_columns(2)
+                        .spacing([8.0, 6.0])
+                        .show(ui, |ui| {
+                            ui.label("主题");
+                            let names = crate::gui::themes::available_themes();
+                            let cur = self.theme_name.clone();
+                            let mut sel = cur.clone();
+                            egui::ComboBox::from_id_salt("theme_combo")
+                                .selected_text(&cur)
+                                .show_ui(ui, |ui| {
+                                    for n in &names {
+                                        ui.selectable_value(&mut sel, n.clone(), n);
+                                    }
+                                });
+                            if sel != cur {
+                                self.theme_name = sel.clone();
+                                self.theme = crate::gui::themes::load_theme(&sel);
+                            }
+                            ui.end_row();
+                            ui.label("字号");
+                            ui.add(
+                                egui::Slider::new(&mut self.font_size, 10.0..=24.0)
+                                    .text("pt")
+                                    .fixed_decimals(1),
+                            );
+                            ui.end_row();
+                            ui.label("导入主题");
+                            ui.horizontal(|ui| {
+                                ui.text_edit_singleline(&mut self.theme_import);
+                                if ui.small_button("导入 .itermcolors").clicked() {
+                                    let p = self.theme_import.trim().to_string();
+                                    if p.is_empty() {
+                                        self.theme_msg =
+                                            Some("请输入 .itermcolors 文件路径".into());
+                                    } else {
+                                        match crate::gui::themes::import_itermcolors(
+                                            std::path::Path::new(&p),
+                                        ) {
+                                            Ok(name) => {
+                                                self.theme_name = name.clone();
+                                                self.theme = crate::gui::themes::load_theme(&name);
+                                                self.theme_msg =
+                                                    Some(format!("✓ 已导入主题 {name}"));
+                                            }
+                                            Err(e) => {
+                                                self.theme_msg = Some(format!("导入失败：{e}"))
+                                            }
+                                        }
+                                    }
+                                }
+                            });
+                            ui.end_row();
+                        });
+                    if let Some(msg) = &self.theme_msg {
+                        ui.label(RichText::new(msg).color(Color32::from_rgb(120, 190, 120)));
                     }
                 });
             if saved {
