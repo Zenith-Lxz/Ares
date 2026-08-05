@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/ares-core",
     "crates/ares-darwin",
+    "crates/ares-audit",
     "crates/ares",
 ]
 
@@ -20,6 +21,7 @@ publish = false
 # 内部 crate
 ares-core = { path = "crates/ares-core" }
 ares-darwin = { path = "crates/ares-darwin" }
+ares-audit = { path = "crates/ares-audit" }
 
 # 外部依赖统一在此声明版本，各 crate 用 workspace = true 引用
 anyhow = "1"

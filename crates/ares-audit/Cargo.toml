@@ -1,0 +1,18 @@
+[package]
+name = "ares-audit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+ares-core.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+blake3 = "1"
+time = { version = "0.3", features = ["formatting", "macros"] }
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
