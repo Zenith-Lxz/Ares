@@ -7,6 +7,8 @@ members = [
     "crates/ares-policy",
     "crates/ares-exec",
     "crates/ares-tools",
+    "crates/ares-agent",
+    "crates/ares-llm",
     "crates/ares",
 ]
 
@@ -28,6 +30,8 @@ ares-audit = { path = "crates/ares-audit" }
 ares-policy = { path = "crates/ares-policy" }
 ares-exec = { path = "crates/ares-exec" }
 ares-tools = { path = "crates/ares-tools" }
+ares-agent = { path = "crates/ares-agent" }
+ares-llm = { path = "crates/ares-llm" }
 
 # 外部依赖统一在此声明版本，各 crate 用 workspace = true 引用
 anyhow = "1"

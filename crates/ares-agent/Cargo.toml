@@ -1,0 +1,20 @@
+[package]
+name = "ares-agent"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+ares-core.workspace = true
+ares-exec.workspace = true
+ares-policy.workspace = true
+ares-audit.workspace = true
+ares-tools.workspace = true
+ares-llm.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+async-trait = "0.1"
+regex = "1"
