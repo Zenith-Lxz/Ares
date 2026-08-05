@@ -60,6 +60,11 @@ impl TermWorkspace {
         self.sessions.iter().any(|s| s.is_exited())
     }
 
+    /// 全部 pane 是否已收到首笔数据（连接中反馈）。
+    fn is_connected(&self) -> bool {
+        !self.sessions.is_empty() && self.sessions.iter().all(|s| s.is_connected())
+    }
+
     /// 分屏：把新会话加为第二个 pane。已有 split 时替换第二个。
     fn split_with(&mut self, s: Session, dir: Split) {
         if self.sessions.len() == 2 {
@@ -312,6 +317,26 @@ impl GuiApp {
             }
             Err(e) => eprintln!("无法打开 {key}：{e}"),
         }
+    }
+
+    /// 面板背景色：主题 bg 向黑方向压暗（沉浸式跟随主题）。
+    fn theme_bg(&self) -> Color32 {
+        let b = self.theme.bg;
+        Color32::from_rgb(b.r() / 2 + 18, b.g() / 2 + 18, b.b() / 2 + 18)
+    }
+
+    /// 重连当前 tab：关闭后按同主机名重新打开（需在主机簿中）。
+    fn reconnect_active(&mut self) {
+        let title = self
+            .tabs
+            .get(self.active)
+            .map(|t| t.title().to_string())
+            .unwrap_or_default();
+        if title.is_empty() || !self.hosts.contains_key(&title) {
+            return;
+        }
+        self.close_active();
+        self.open_tab(&title);
     }
 
     /// 打开 SFTP 浏览 tab（Netcatty 的 SFTP 功能）。
@@ -898,9 +923,30 @@ impl eframe::App for GuiApp {
                         } else {
                             ""
                         };
-                        ui.label(format!("规则：{rule}{tag}"));
+                        ui.colored_label(
+                            Color32::from_rgb(230, 190, 90),
+                            format!("规则：{rule}{tag}"),
+                        );
                     } else {
-                        ui.label(format!("判定：{}", decision_label(&p.req.decision)));
+                        // 判定等级：deny=红 / observer=绿 / auto=蓝
+                        let (txt, color) = match &p.req.decision {
+                            Decision::Deny { .. } => {
+                                ("判定：禁止执行".to_string(), Color32::from_rgb(220, 90, 90))
+                            }
+                            Decision::Observer => (
+                                "判定：观察执行".to_string(),
+                                Color32::from_rgb(110, 190, 110),
+                            ),
+                            Decision::Auto { .. } => (
+                                "判定：自动执行".to_string(),
+                                Color32::from_rgb(110, 150, 220),
+                            ),
+                            _ => (
+                                format!("判定：{}", decision_label(&p.req.decision)),
+                                Color32::from_rgb(179, 146, 74),
+                            ),
+                        };
+                        ui.colored_label(color, txt);
                     }
                     ui.add_space(4.0);
                     ui.monospace(ares_core::display::sanitize(&p.req.command));
@@ -922,105 +968,132 @@ impl eframe::App for GuiApp {
         // ── 顶部：Tab 栏（可隐藏：iTerm2 极简模式；Ctrl-T/W 仍可用）──
         if self.settings.hide_tabs {
             // 隐藏时只保留一个极小的「+」入口，避免无法新增 tab
-            egui::TopBottomPanel::top("tabs_hidden").show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    if ui.button("+").clicked() {
-                        self.picking = true;
-                    }
-                    if ui
-                        .selectable_label(self.agent_open, RichText::new("Agent").strong())
-                        .clicked()
-                    {
-                        self.toggle_agent_simple();
-                    }
+            let panel_bg = self.theme_bg();
+            egui::TopBottomPanel::top("tabs_hidden")
+                .frame(egui::Frame::none().fill(panel_bg))
+                .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        if ui.button("+").clicked() {
+                            self.picking = true;
+                        }
+                        if ui
+                            .selectable_label(self.agent_open, RichText::new("Agent").strong())
+                            .clicked()
+                        {
+                            self.toggle_agent_simple();
+                        }
+                    });
                 });
-            });
         } else {
-            egui::TopBottomPanel::top("tabs").show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    let mut to_close: Option<usize> = None;
-                    let mut to_activate: Option<usize> = None;
-                    for (i, t) in self.tabs.iter().enumerate() {
-                        let selected = i == self.active;
-                        let exited = matches!(t, Tab::Term(w) if w.is_exited());
-                        let label = if exited {
-                            format!("✗ {}", t.title())
-                        } else {
-                            t.title().to_string()
-                        };
-                        let btn = ui.selectable_label(selected, label);
-                        if btn.clicked() {
-                            to_activate = Some(i);
+            let panel_bg = self.theme_bg();
+            egui::TopBottomPanel::top("tabs")
+                .frame(egui::Frame::none().fill(panel_bg))
+                .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        let mut to_close: Option<usize> = None;
+                        let mut to_activate: Option<usize> = None;
+                        for (i, t) in self.tabs.iter().enumerate() {
+                            let selected = i == self.active;
+                            let exited = matches!(t, Tab::Term(w) if w.is_exited());
+                            let label = if exited {
+                                format!("✗ {}", t.title())
+                            } else {
+                                t.title().to_string()
+                            };
+                            let btn = ui.selectable_label(selected, label);
+                            if btn.clicked() {
+                                to_activate = Some(i);
+                            }
+                            // 关闭按钮（选中 tab 显示 ×）
+                            if selected && ui.small_button("×").clicked() {
+                                to_close = Some(i);
+                            }
                         }
-                        // 关闭按钮（选中 tab 显示 ×）
-                        if selected && ui.small_button("×").clicked() {
-                            to_close = Some(i);
+                        if ui.button("+").clicked() {
+                            self.picking = true;
                         }
-                    }
-                    if ui.button("+").clicked() {
-                        self.picking = true;
-                    }
-                    if let Some(i) = to_activate {
-                        self.active = i;
-                    }
-                    if let Some(i) = to_close {
-                        self.active = i;
-                        self.close_active();
-                    }
-                    // Agent 面板开关
-                    if ui
-                        .selectable_label(self.agent_open, RichText::new("Agent").strong())
-                        .clicked()
-                    {
-                        self.toggle_agent_simple();
-                    }
+                        if let Some(i) = to_activate {
+                            self.active = i;
+                        }
+                        if let Some(i) = to_close {
+                            self.active = i;
+                            self.close_active();
+                        }
+                        // Agent 面板开关
+                        if ui
+                            .selectable_label(self.agent_open, RichText::new("Agent").strong())
+                            .clicked()
+                        {
+                            self.toggle_agent_simple();
+                        }
+                    });
                 });
-            });
         }
 
         // ── 底部：状态栏 ──
-        egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                if let Some(t) = self.tabs.get(self.active) {
-                    let (label, color) = match t {
-                        Tab::Term(w) => {
-                            let st = if w.is_exited() {
-                                "已退出"
-                            } else {
-                                "已连接"
-                            };
-                            let panes = if w.sessions.len() > 1 {
-                                format!("{} ({}pane)", w.title(), w.sessions.len())
-                            } else {
-                                w.title().to_string()
-                            };
-                            (format!("{panes} · {st}"), Color32::from_rgb(179, 146, 74))
+        let panel_bg = self.theme_bg();
+        egui::TopBottomPanel::bottom("status")
+            .frame(egui::Frame::none().fill(panel_bg))
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    let mut reconnect = false;
+                    if let Some(t) = self.tabs.get(self.active) {
+                        let (label, color) = match t {
+                            Tab::Term(w) => {
+                                // 连接状态：连接中 → 已连接 → 已断开
+                                let st = if w.is_exited() {
+                                    "已断开"
+                                } else if !w.is_connected() {
+                                    "连接中…"
+                                } else {
+                                    "已连接"
+                                };
+                                let panes = if w.sessions.len() > 1 {
+                                    format!("{} ({}pane)", w.title(), w.sessions.len())
+                                } else {
+                                    w.title().to_string()
+                                };
+                                let color = match st {
+                                    "已断开" => Color32::from_rgb(220, 90, 90),
+                                    "连接中…" => Color32::from_rgb(230, 190, 90),
+                                    _ => Color32::from_rgb(179, 146, 74),
+                                };
+                                (format!("{panes} · {st}"), color)
+                            }
+                            Tab::Sftp(p) => (
+                                format!("{} · SFTP", p.title),
+                                Color32::from_rgb(90, 160, 200),
+                            ),
+                        };
+                        ui.label(RichText::new(label).color(color));
+                        // 断开时提供重连入口（UI-C）
+                        if let Tab::Term(w) = t {
+                            if w.is_exited() && ui.small_button("↻ 重连").clicked() {
+                                reconnect = true;
+                            }
                         }
-                        Tab::Sftp(p) => (
-                            format!("{} · SFTP", p.title),
-                            Color32::from_rgb(90, 160, 200),
-                        ),
-                    };
-                    ui.label(RichText::new(label).color(color));
-                } else {
-                    ui.label(RichText::new("无会话").color(Color32::GRAY));
-                }
-                ui.separator();
-                ui.label(
-                    RichText::new(format!(
-                        "{} 个会话 · Ctrl-T 新会话 · Ctrl-a a Agent",
-                        self.tabs.len()
-                    ))
-                    .color(Color32::GRAY),
-                );
+                    } else {
+                        ui.label(RichText::new("无会话").color(Color32::GRAY));
+                    }
+                    ui.separator();
+                    ui.label(
+                        RichText::new("Ctrl-T 新会话 · Ctrl-a a Agent · Ctrl+Shift+D/E 分屏")
+                            .color(Color32::GRAY),
+                    );
+                    if reconnect {
+                        self.reconnect_active();
+                    }
+                });
             });
-        });
 
-        // ── 右侧：Agent 面板 ──
+        // ── 底部：Agent 面板（唤出式，iTerm2 极简形态：不挤压终端宽度）──
         if self.agent_open {
-            egui::SidePanel::right("agent_panel")
+            let panel_bg = self.theme_bg();
+            egui::TopBottomPanel::bottom("agent_panel")
                 .resizable(true)
-                .default_width(380.0)
+                .default_height(280.0)
+                .min_height(160.0)
+                .frame(egui::Frame::none().fill(panel_bg))
                 .show(ctx, |ui| {
                     ui.heading("Agent");
                     ui.label(

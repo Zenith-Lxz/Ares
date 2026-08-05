@@ -26,6 +26,8 @@ pub struct Session {
     _child: Arc<Mutex<Box<dyn Child + Send + Sync>>>,
     /// pty 已关闭（ssh 退出）。
     pub exited: Arc<Mutex<bool>>,
+    /// 已收到首笔远端数据（ssh 握手完成，连接中状态用）。
+    pub connected: Arc<Mutex<bool>>,
 }
 
 impl Session {
@@ -98,17 +100,20 @@ impl Session {
 
         let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 0)));
         let exited = Arc::new(Mutex::new(false));
+        let connected = Arc::new(Mutex::new(false));
 
         // 读线程：pty 输出 → vt100 解析（每批数据后通知 GUI 重画）
         {
             let parser = Arc::clone(&parser);
             let exited = Arc::clone(&exited);
+            let connected = Arc::clone(&connected);
             std::thread::spawn(move || {
                 let mut buf = [0u8; 8192];
                 loop {
                     match reader.read(&mut buf) {
                         Ok(0) | Err(_) => break,
                         Ok(n) => {
+                            *connected.lock().unwrap() = true;
                             if let Ok(mut p) = parser.lock() {
                                 p.process(&buf[..n]);
                             }
@@ -126,6 +131,7 @@ impl Session {
             parser,
             writer: Arc::new(Mutex::new(writer)),
             master: Arc::new(Mutex::new(pair.master)),
+            connected,
             _child: Arc::new(Mutex::new(child)),
             exited,
         })
@@ -186,6 +192,11 @@ impl Session {
     /// ssh 进程是否已退出。
     pub fn is_exited(&self) -> bool {
         *self.exited.lock().unwrap()
+    }
+
+    /// 是否已收到首笔远端数据（连接中反馈用）。
+    pub fn is_connected(&self) -> bool {
+        *self.connected.lock().unwrap()
     }
 }
 
