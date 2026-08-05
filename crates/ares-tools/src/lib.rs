@@ -9,8 +9,12 @@ pub mod registry;
 pub mod stored;
 pub mod terminal;
 
-#[cfg(test)]
+// 供下游 crate 的测试使用。生产构建中不包含。
+#[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
+
+#[cfg(any(test, feature = "test-support"))]
+pub use test_support::test_ctx as test_support_ctx;
 
 pub use budget::{BudgetedOutput, OutputBudget};
 pub use environment::GetEnvironmentTool;

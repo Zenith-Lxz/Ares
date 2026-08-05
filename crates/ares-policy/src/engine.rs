@@ -241,6 +241,14 @@ impl PolicyEngine {
     pub fn env_of(&self, host: &HostId) -> Env {
         self.hosts.env_of(host)
     }
+
+    /// 该命令是否属于极高危 —— 需要在确认之外追加输入主机名。
+    ///
+    /// `Decision::Confirm` 已携带 `critical` 标记（Task 5），本方法保留为
+    /// 独立查询（Task 21 构造审批请求与审计/统计用）。
+    pub fn is_critical(&self, command: &str) -> bool {
+        self.critical.iter().any(|p| p.matches(command))
+    }
 }
 
 fn compile_all(pats: impl Iterator<Item = String>) -> Result<Vec<CommandPattern>> {

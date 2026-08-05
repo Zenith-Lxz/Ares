@@ -1,4 +1,5 @@
-//! 测试辅助。仅在 test 构建中编译。
+//! 测试辅助。通过 `test-support` feature 暴露给下游 crate 的测试使用，
+//! 生产构建中不包含。
 
 use crate::registry::ToolContext;
 use ares_audit::AuditWriter;

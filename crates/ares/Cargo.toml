@@ -11,5 +11,16 @@ path = "src/main.rs"
 
 [dependencies]
 ares-core.workspace = true
+ares-darwin.workspace = true
+ares-audit.workspace = true
+ares-policy.workspace = true
+ares-exec.workspace = true
+ares-tools.workspace = true
+ares-llm.workspace = true
+ares-agent.workspace = true
 anyhow.workspace = true
 tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+clap = { version = "4", features = ["derive"] }
+rpassword = "7"
