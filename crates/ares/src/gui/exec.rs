@@ -95,20 +95,25 @@ fn diff_since(baseline: &str, final_text: &str) -> String {
 }
 
 /// 空会话保护：不 panic 的稳定判定。
-/// 多主机路由执行器（2026-08-05 多主机编排）：
-/// 当前 pane 主机 → 终端注入（用户看得见）；其他主机 → SshExecutor 独立通道。
+/// 多主机路由执行器（2026-08-05 多主机编排 + 批次5 直连）：
+/// 当前 pane 主机 → 终端注入（用户看得见）；其他主机 → **russh 原生直连**
+/// （不依赖本机 ssh 二进制 —— 当前机器没装 ssh 也能操作）。
 pub struct RoutedExecutor {
     current: TerminalSessionExecutor,
     current_host: HostId,
-    ssh: ares_exec::SshExecutor,
+    ssh: crate::gui::russh_exec::RusshExecutor,
 }
 
 impl RoutedExecutor {
-    pub fn new(current: TerminalSessionExecutor, current_host: HostId) -> Self {
+    pub fn new(
+        current: TerminalSessionExecutor,
+        current_host: HostId,
+        hosts: std::sync::Arc<ares_core::config::HostsConfig>,
+    ) -> Self {
         Self {
             current,
             current_host,
-            ssh: ares_exec::SshExecutor::new(),
+            ssh: crate::gui::russh_exec::RusshExecutor::new(hosts),
         }
     }
 }

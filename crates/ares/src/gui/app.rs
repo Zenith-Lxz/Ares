@@ -487,7 +487,12 @@ impl GuiApp {
             // 终端注入执行器：agent 的命令直接写进当前终端会话
             // （Session 内部状态全 Arc 共享，clone 后注入的是同一个会话）
             let current = TerminalSessionExecutor::new(session.clone());
-            let executor = Arc::new(RoutedExecutor::new(current, HostId::new(host.clone())));
+            let hosts_cfg = Arc::new(HostsConfig::load().unwrap_or_default());
+            let executor = Arc::new(RoutedExecutor::new(
+                current,
+                HostId::new(host.clone()),
+                hosts_cfg,
+            ));
             // GUI 审批通道
             let (approver, rx) = GuiApprover::pair();
             self.approve_rx = rx;

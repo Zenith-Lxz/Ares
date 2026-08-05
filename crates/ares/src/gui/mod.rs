@@ -3,6 +3,7 @@
 pub mod app;
 pub mod approver;
 pub mod exec;
+pub mod russh_exec;
 pub mod session;
 pub mod sftp;
 pub mod term;
