@@ -342,13 +342,19 @@ impl GuiApp {
     }
 
     /// 转发输入事件到当前会话（拦截全局快捷键）。
+    ///
+    /// 焦点检测：当 Agent 输入框 / 主机过滤框 / 设置表单有焦点时，
+    /// 用户打字只进输入框，不再同步到终端（2026-08-05 用户反馈）。
     fn handle_input(&mut self, ctx: &egui::Context) {
+        let any_focus = ctx.memory(|m| m.focused().is_some());
         let events = ctx.input(|i| i.events.clone());
         for ev in events {
             match ev {
                 egui::Event::Text(t) => {
-                    if let Some(Tab::Term(w)) = self.tabs.get(self.active) {
-                        w.sessions[w.active].write(t.as_bytes());
+                    if !any_focus {
+                        if let Some(Tab::Term(w)) = self.tabs.get(self.active) {
+                            w.sessions[w.active].write(t.as_bytes());
+                        }
                     }
                 }
                 egui::Event::Key { key, modifiers, .. } => {
@@ -383,10 +389,13 @@ impl GuiApp {
                             _ => {}
                         }
                     }
-                    // 转发给当前终端会话（可打印字符已走 Event::Text；SFTP 面板不转发）
-                    if let Some(Tab::Term(w)) = self.tabs.get(self.active) {
-                        if let Some(bytes) = key_bytes(key, ctrl) {
-                            w.sessions[w.active].write(&bytes);
+                    // 转发给当前终端会话（可打印字符已走 Event::Text；SFTP 面板不转发；
+                    // 输入框聚焦时不转发）
+                    if !any_focus {
+                        if let Some(Tab::Term(w)) = self.tabs.get(self.active) {
+                            if let Some(bytes) = key_bytes(key, ctrl) {
+                                w.sessions[w.active].write(&bytes);
+                            }
                         }
                     }
                 }
@@ -472,14 +481,25 @@ impl AgentBridge {
             match ev {
                 AgentEvent::Turn(Ok(r)) => {
                     let mut body = r.reply.clone();
+                    // 工具执行记录只保留一行精简摘要（完整输出在终端可见，
+                    // 不在面板里重复 —— 2026-08-05 用户反馈「回答太乱」）
                     for run in &r.tool_runs {
+                        let cmd = run.command.clone().unwrap_or_default();
+                        let short: String = cmd.chars().take(60).collect();
+                        let cmd_txt = if cmd.chars().count() > 60 {
+                            format!("{short}…")
+                        } else {
+                            cmd
+                        };
                         body = format!(
-                            "{}\n[{}] {} {}\n{}",
-                            body,
+                            "\n{body}\n· [{}] {}{}",
                             run.decision_label,
                             run.tool,
-                            run.command.clone().unwrap_or_default(),
-                            run.display
+                            if cmd_txt.is_empty() {
+                                String::new()
+                            } else {
+                                format!(" {cmd_txt}")
+                            }
                         );
                     }
                     self.messages.push(("assistant".into(), body));
@@ -814,6 +834,14 @@ impl eframe::App for GuiApp {
                         }
                         let screen = ws.sessions[0].screen();
                         term::draw_terminal(ui, &screen, MONO);
+                        // 点击终端空白处：清除输入框焦点，恢复直接输入
+                        let tr = ui.available_rect_before_wrap();
+                        if ui
+                            .interact(tr, ui.id().with("term_focus"), egui::Sense::click())
+                            .clicked()
+                        {
+                            ctx.memory_mut(|m| m.stop_text_input());
+                        }
                     } else {
                         // 分屏：按方向均分区域，每个 pane 独立渲染
                         let split = ws.split.unwrap_or(Split::Vertical);
@@ -836,10 +864,11 @@ impl eframe::App for GuiApp {
                                     egui::vec2(rect.width(), half),
                                 )
                             };
-                            // 点击切换 active pane
+                            // 点击切换 active pane + 清除输入框焦点
                             let id = ui.id().with(("pane", i));
                             if ui.interact(r, id, egui::Sense::click()).clicked() {
                                 ws.active = i;
+                                ctx.memory_mut(|m| m.stop_text_input());
                             }
                             let mut child =
                                 ui.new_child(egui::UiBuilder::new().max_rect(r.shrink(if is_v {
