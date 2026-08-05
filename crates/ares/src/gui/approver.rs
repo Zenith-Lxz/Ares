@@ -8,6 +8,10 @@ use ares_agent::{ApprovalRequest, ApprovalResult, Approver};
 use ares_core::{AresError, Result};
 use async_trait::async_trait;
 use std::sync::mpsc::{Receiver, Sender};
+use std::time::Duration;
+
+/// 审批弹窗最长等待：超时自动按拒绝处理（fail-closed，2026-08-05）。
+const APPROVAL_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// 待用户决策的审批请求（GUI 侧持有）。
 pub struct PendingApproval {
@@ -39,8 +43,14 @@ impl Approver for GuiApprover {
             })
             .map_err(|_| AresError::ApprovalRejected)?;
 
-        // 阻塞等待用户决策；GUI 关闭（channel 断开）→ 拒绝
-        respond_rx.recv().map_err(|_| AresError::ApprovalRejected)
+        // 阻塞等待用户决策（60s 超时自动拒绝，fail-closed）；GUI 关闭 → 拒绝
+        match respond_rx.recv_timeout(APPROVAL_TIMEOUT) {
+            Ok(result) => Ok(result),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Ok(ApprovalResult::Timeout),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                Err(AresError::ApprovalRejected)
+            }
+        }
     }
 }
 

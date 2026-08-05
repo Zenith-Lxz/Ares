@@ -974,6 +974,19 @@ impl eframe::App for GuiApp {
                                     ui.add_space(4.0);
                                 }
                             });
+                        // 快捷指令（运维常见动作一键填入）
+                        ui.horizontal_wrapped(|ui| {
+                            for (label, prompt) in [
+                                ("磁盘", "查看磁盘占用情况"),
+                                ("内存", "查看内存使用情况"),
+                                ("日志", "查看系统日志"),
+                                ("服务", "查看服务状态"),
+                            ] {
+                                if ui.small_button(label).clicked() && !a.busy {
+                                    a.input = prompt.to_string();
+                                }
+                            }
+                        });
                         // 输入区
                         ui.separator();
                         let resp = ui.add(
