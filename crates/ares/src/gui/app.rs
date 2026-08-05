@@ -166,6 +166,10 @@ struct AgentBridge {
     busy: bool,
     tx: Sender<AgentEvent>,
     rx: Receiver<AgentEvent>,
+    /// 实时进度（AgentLoop 共享状态，不经主体锁）
+    progress: Arc<std::sync::Mutex<Option<String>>>,
+    cancel: Arc<std::sync::atomic::AtomicBool>,
+    progress_text: Option<String>,
 }
 
 enum AgentEvent {
@@ -470,8 +474,14 @@ impl GuiApp {
 impl AgentBridge {
     fn new(agent: AgentLoop) -> Self {
         let (tx, rx) = mpsc::channel();
+        let agent = Arc::new(tokio::sync::Mutex::new(agent));
+        // 刚构造无人持锁：直接提取共享状态
+        let (progress, cancel) = {
+            let a = agent.try_lock().expect("新构建的 AgentLoop 无人持锁");
+            (a.progress.clone(), a.cancel.clone())
+        };
         Self {
-            agent: Arc::new(tokio::sync::Mutex::new(agent)),
+            agent,
             messages: vec![(
                 "system".into(),
                 "Agent 已就绪。输入运维目标，将针对当前主机执行（变更操作需确认）。".into(),
@@ -480,7 +490,16 @@ impl AgentBridge {
             busy: false,
             tx,
             rx,
+            progress,
+            cancel,
+            progress_text: None,
         }
+    }
+
+    /// 停止当前任务。
+    fn stop(&self) {
+        self.cancel
+            .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
     fn send(&mut self, rt: &Arc<tokio::runtime::Runtime>) {
@@ -491,6 +510,8 @@ impl AgentBridge {
         self.input.clear();
         self.messages.push(("user".into(), text.clone()));
         self.busy = true;
+        self.cancel
+            .store(false, std::sync::atomic::Ordering::Relaxed);
 
         let agent = Arc::clone(&self.agent);
         let tx = self.tx.clone();
@@ -504,8 +525,9 @@ impl AgentBridge {
         });
     }
 
-    /// 每帧收取完成的任务。
+    /// 每帧收取完成的任务 + 刷新实时进度。
     fn poll(&mut self) {
+        self.progress_text = self.progress.try_lock().ok().and_then(|p| p.clone());
         while let Ok(ev) = self.rx.try_recv() {
             match ev {
                 AgentEvent::Turn(Ok(r)) => {
@@ -830,7 +852,17 @@ impl eframe::App for GuiApp {
                         }
                         let mut send_clicked = false;
                         if a.busy {
-                            ui.label(RichText::new("…").color(Color32::GRAY));
+                            if let Some(p) = &a.progress_text {
+                                ui.label(
+                                    RichText::new(format!("⏳ {p}"))
+                                        .color(Color32::from_rgb(179, 146, 74)),
+                                );
+                            } else {
+                                ui.label(RichText::new("…").color(Color32::GRAY));
+                            }
+                            if ui.button("■ 停止").clicked() {
+                                a.stop();
+                            }
                         } else {
                             send_clicked = ui.button("发送").clicked();
                         }

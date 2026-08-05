@@ -40,6 +40,10 @@ pub struct AgentLoop {
     max_tool_rounds: usize,
     /// 本会话累计 token 用量（run_turn 更新；handle_tool_call 写审计用）
     usage: tokio::sync::Mutex<Usage>,
+    /// 当前正在执行的工具（GUI 进度显示；独立 std Mutex 不经主体锁）
+    pub progress: Arc<std::sync::Mutex<Option<String>>>,
+    /// 取消请求标志（GUI 停止按钮置位；run_turn 各检查点提前终止）
+    pub cancel: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl AgentLoop {
@@ -70,7 +74,20 @@ impl AgentLoop {
             history: vec![Message::system(system)],
             max_tool_rounds: 12,
             usage: tokio::sync::Mutex::new(Usage::default()),
+            progress: Arc::new(std::sync::Mutex::new(None)),
+            cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
+    }
+
+    /// 当前进度文本（无则 None）。
+    pub fn current_progress(&self) -> Option<String> {
+        self.progress.lock().unwrap().clone()
+    }
+
+    /// 请求中断当前 turn。
+    pub fn request_cancel(&self) {
+        self.cancel
+            .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
     fn tool_defs(&self) -> Vec<ToolDef> {
@@ -96,6 +113,17 @@ impl AgentLoop {
         let mut denials = 0usize;
 
         for round in 0..self.max_tool_rounds {
+            // 中断检查点：用户可随时停止（GUI 停止按钮）
+            if self.cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                let note = "已中断（用户停止）。报告当前进展。".to_string();
+                self.history.push(Message::user(note.clone()));
+                return Ok(TurnResult {
+                    reply: note,
+                    tool_runs,
+                    usage,
+                });
+            }
+
             let req = CompletionRequest::new(&self.model, self.history.clone())
                 .with_tools(self.tool_defs());
 
@@ -120,7 +148,23 @@ impl AgentLoop {
             ));
 
             for call in &resp.tool_calls {
+                // 进度：显示正在执行的工具与命令（GUI 实时读取）
+                let hint = call.arguments["command"]
+                    .as_str()
+                    .map(|c| {
+                        let short: String = c.chars().take(48).collect();
+                        if c.chars().count() > 48 {
+                            format!("{short}…")
+                        } else {
+                            short
+                        }
+                    })
+                    .unwrap_or_default();
+                *self.progress.lock().unwrap() =
+                    Some(format!("{} {hint}", call.name).trim().to_string());
+
                 let (run, tool_message) = self.handle_tool_call(call).await;
+                *self.progress.lock().unwrap() = None;
                 if matches!(run.decision_label.as_str(), "deny" | "rejected" | "timeout") {
                     denials += 1;
                 }
