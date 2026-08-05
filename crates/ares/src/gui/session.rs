@@ -42,7 +42,28 @@ impl Session {
         cols: u16,
         repaint: Arc<dyn Fn() + Send + Sync>,
     ) -> anyhow::Result<Self> {
+        Self::open_with_auth(alias, target, rows, cols, repaint, "key")
+    }
+
+    /// 打开 ssh 会话（auth=password 时用 SSH_ASKPASS 从钥匙串读密码，vault）。
+    pub fn open_with_auth(
+        alias: &str,
+        target: &ConnTarget,
+        rows: u16,
+        cols: u16,
+        repaint: Arc<dyn Fn() + Send + Sync>,
+        auth: &str,
+    ) -> anyhow::Result<Self> {
         let mut cmd = CommandBuilder::new("ssh");
+        // 密码主机（vault）：SSH_ASKPASS 脚本从钥匙串读 ssh-pw:<alias>
+        if auth == "password" {
+            let script = write_askpass(alias)?;
+            cmd.env("SSH_ASKPASS", script);
+            cmd.env("SSH_ASKPASS_REQUIRE", "force");
+            cmd.env("DISPLAY", ":0");
+            cmd.arg("-o");
+            cmd.arg("NumberOfPasswordPrompts=1");
+        }
         if let Some(p) = target.port {
             if p != 22 {
                 cmd.arg("-p");
@@ -248,4 +269,22 @@ mod tests {
         p.set_size(40, 100);
         assert_eq!(p.screen().size(), (40, 100));
     }
+}
+
+/// 写 SSH_ASKPASS 脚本（读取钥匙串 ssh-pw:<alias> 输出密码）。
+/// 脚本内容不含密码明文；700 权限。
+fn write_askpass(alias: &str) -> anyhow::Result<std::path::PathBuf> {
+    let dir = ares_core::paths::data_dir().join("askpass");
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join(format!("askpass-{alias}.sh"));
+    let script = format!(
+        "#!/bin/sh\nexec /usr/bin/security find-generic-password -s ares -a \"ssh-pw:{alias}\" -w 2>/dev/null\n"
+    );
+    std::fs::write(&path, script)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(path)
 }

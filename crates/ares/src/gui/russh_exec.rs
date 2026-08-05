@@ -68,10 +68,16 @@ impl Executor for RusshExecutor {
             entry.user.clone()
         };
         let port = entry.port.unwrap_or(22);
+        let auth = if entry.auth.is_empty() {
+            "key"
+        } else {
+            entry.auth.as_str()
+        }
+        .to_string();
 
         let timeout = req.timeout;
         let (stdout, timed_out) = tokio::time::timeout(timeout, async {
-            exec_remote(&hostname, port, &user, &req.command).await
+            exec_remote(alias, &hostname, port, &user, &req.command, &auth).await
         })
         .await
         .map_err(|_| AresError::Exec(format!("直连 {alias} 执行超时（{}s）", timeout.as_secs())))?
@@ -95,10 +101,12 @@ impl Executor for RusshExecutor {
 
 /// russh 直连执行一条命令，返回 (stdout, timed_out)。
 async fn exec_remote(
+    alias: &str,
     hostname: &str,
     port: u16,
     user: &str,
     command: &str,
+    auth: &str,
 ) -> std::result::Result<(String, bool), String> {
     let config = Arc::new(client::Config::default());
     let addr = format!("{hostname}:{port}");
@@ -106,22 +114,39 @@ async fn exec_remote(
         .await
         .map_err(|e| format!("连接失败：{e}"))?;
 
-    // 认证：默认私钥依次尝试
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    // 认证：密码主机走 keychain 密码（vault），否则默认私钥依次尝试
     let mut authed = false;
-    for key_name in KEY_NAMES {
-        let path = PathBuf::from(&home).join(".ssh").join(key_name);
-        if !path.exists() {
-            continue;
+    if auth == "password" {
+        // keychain account: ssh-pw:<alias>（GUI 添加主机时写入）
+        match ares_darwin::keychain::get_secret(&format!("ssh-pw:{alias}")) {
+            Ok(Some(pw)) => {
+                if let Ok(auth_res) = session.authenticate_password(user, pw.clone()).await {
+                    authed = auth_res.success();
+                }
+            }
+            _ => {
+                return Err(format!(
+                    "认证失败：{alias} 配置了密码认证但钥匙串中没有密码（ssh-pw:{alias}）"
+                )
+                .into());
+            }
         }
-        let Ok(key) = russh::keys::load_secret_key(&path, None) else {
-            continue;
-        };
-        let key = PrivateKeyWithHashAlg::new(Arc::new(key), None);
-        if let Ok(auth) = session.authenticate_publickey(user, key).await {
-            if auth.success() {
-                authed = true;
-                break;
+    } else {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+        for key_name in KEY_NAMES {
+            let path = PathBuf::from(&home).join(".ssh").join(key_name);
+            if !path.exists() {
+                continue;
+            }
+            let Ok(key) = russh::keys::load_secret_key(&path, None) else {
+                continue;
+            };
+            let key = PrivateKeyWithHashAlg::new(Arc::new(key), None);
+            if let Ok(auth_res) = session.authenticate_publickey(user, key).await {
+                if auth_res.success() {
+                    authed = true;
+                    break;
+                }
             }
         }
     }

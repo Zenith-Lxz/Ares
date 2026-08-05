@@ -39,9 +39,10 @@ impl SftpPanel {
         title: &str,
         target: &ConnTarget,
         user: &str,
+        auth: &str,
         rt: &tokio::runtime::Runtime,
     ) -> Result<Self, String> {
-        let sftp = rt.block_on(connect_sftp(target, user))?;
+        let sftp = rt.block_on(connect_sftp(target, user, title, auth))?;
         let (tx, rx) = std::sync::mpsc::channel();
         let mut panel = Self {
             title: title.into(),
@@ -221,8 +222,13 @@ impl SftpPanel {
     }
 }
 
-/// 建立 russh 连接并认证（私钥优先），返回 SFTP 会话。
-async fn connect_sftp(target: &ConnTarget, user: &str) -> Result<SftpSession, String> {
+/// 建立 russh 连接并认证（私钥优先；密码主机走 keychain vault），返回 SFTP 会话。
+async fn connect_sftp(
+    target: &ConnTarget,
+    user: &str,
+    alias: &str,
+    auth: &str,
+) -> Result<SftpSession, String> {
     let config = std::sync::Arc::new(client::Config::default());
     let port = target.port.unwrap_or(22);
     let addr = format!("{}:{port}", target.hostname);
@@ -230,22 +236,38 @@ async fn connect_sftp(target: &ConnTarget, user: &str) -> Result<SftpSession, St
         .await
         .map_err(|e| format!("连接失败：{e}"))?;
 
-    // 认证：依次尝试默认私钥
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    // 认证：密码主机走 keychain（ssh-pw:<alias>），否则依次尝试默认私钥
     let mut authed = false;
-    for key_name in ["id_ed25519", "id_rsa", "id_ecdsa"] {
-        let path = PathBuf::from(&home).join(".ssh").join(key_name);
-        if !path.exists() {
-            continue;
+    if auth == "password" {
+        match ares_darwin::keychain::get_secret(&format!("ssh-pw:{alias}")) {
+            Ok(Some(pw)) => {
+                if let Ok(res) = session.authenticate_password(user, pw.clone()).await {
+                    authed = res.success();
+                }
+            }
+            _ => {
+                return Err(format!(
+                    "认证失败：{alias} 配置了密码认证但钥匙串中没有密码（ssh-pw:{alias}）"
+                )
+                .into());
+            }
         }
-        let Ok(key) = russh::keys::load_secret_key(&path, None) else {
-            continue;
-        };
-        let key = russh::keys::PrivateKeyWithHashAlg::new(std::sync::Arc::new(key), None);
-        if let Ok(auth) = session.authenticate_publickey(user, key).await {
-            if auth.success() {
-                authed = true;
-                break;
+    } else {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+        for key_name in ["id_ed25519", "id_rsa", "id_ecdsa"] {
+            let path = PathBuf::from(&home).join(".ssh").join(key_name);
+            if !path.exists() {
+                continue;
+            }
+            let Ok(key) = russh::keys::load_secret_key(&path, None) else {
+                continue;
+            };
+            let key = russh::keys::PrivateKeyWithHashAlg::new(std::sync::Arc::new(key), None);
+            if let Ok(auth_res) = session.authenticate_publickey(user, key).await {
+                if auth_res.success() {
+                    authed = true;
+                    break;
+                }
             }
         }
     }

@@ -115,6 +115,9 @@ struct AddHostFields {
     port: String,
     env: String,
     tags: String,
+    /// key | password（密码主机：密码存 keychain ssh-pw:<name>）
+    auth: String,
+    password: String,
 }
 
 /// 「模型设置」弹窗的表单字段。
@@ -301,7 +304,12 @@ impl GuiApp {
             None => Arc::new(|| {}),
         };
         let dir = self.split_pending.take();
-        match Session::open(key, &target, 24, 80, repaint) {
+        let auth = if entry.auth.is_empty() {
+            "key"
+        } else {
+            entry.auth.as_str()
+        };
+        match Session::open_with_auth(key, &target, 24, 80, repaint, auth) {
             Ok(s) => {
                 if let Some(dir) = dir {
                     // 分屏：加为当前 tab 的第二个 pane
@@ -358,7 +366,12 @@ impl GuiApp {
         } else {
             entry.user.clone()
         };
-        match SftpPanel::connect(key, &target, &user, &self.rt) {
+        let auth = if entry.auth.is_empty() {
+            "key"
+        } else {
+            entry.auth.as_str()
+        };
+        match SftpPanel::connect(key, &target, &user, auth, &self.rt) {
             Ok(p) => {
                 self.tabs.push(Tab::Sftp(p));
                 self.active = self.tabs.len() - 1;
@@ -1675,6 +1688,25 @@ impl eframe::App for GuiApp {
                             ui.label("标签(逗号分隔)");
                             ui.text_edit_singleline(&mut f.tags);
                             ui.end_row();
+                            ui.label("认证方式");
+                            ui.horizontal(|ui| {
+                                ui.selectable_value(&mut f.auth, "key".to_string(), "🔑 密钥");
+                                ui.selectable_value(
+                                    &mut f.auth,
+                                    "password".to_string(),
+                                    "🔒 密码（存钥匙串）",
+                                );
+                            });
+                            ui.end_row();
+                            if f.auth == "password" {
+                                ui.label("密码");
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut f.password)
+                                        .password(true)
+                                        .hint_text("写入 macOS 钥匙串 ssh-pw:<名称>"),
+                                );
+                                ui.end_row();
+                            }
                         });
                     ui.add_space(6.0);
                     ui.label(
@@ -1707,6 +1739,17 @@ impl eframe::App for GuiApp {
                                     .map(|t| t.trim().to_string())
                                     .filter(|t| !t.is_empty())
                                     .collect();
+                                // 认证方式：password → 密码存钥匙串（vault），
+                                // hosts.toml 只存 auth 标记不进密码
+                                if f.auth == "password" {
+                                    entry.auth = "password".into();
+                                    if !f.password.trim().is_empty() {
+                                        let _ = ares_darwin::keychain::set_secret(
+                                            &format!("ssh-pw:{name}"),
+                                            f.password.trim(),
+                                        );
+                                    }
+                                }
                                 let key = name.clone();
                                 self.add_host(key, entry);
                                 close = true;
