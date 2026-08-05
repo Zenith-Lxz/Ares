@@ -643,6 +643,9 @@ impl AgentBridge {
                 match result {
                     Ok(raw) => {
                         let summary = persist_reflection(&raw);
+                        // 顺带：记忆库超长时压缩合并（防无限增长）
+                        let a = agent.lock().await;
+                        let _ = a.compress_memory().await;
                         let _ = tx.send(AgentEvent::Reflection(summary));
                     }
                     Err(_) => {

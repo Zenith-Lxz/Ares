@@ -55,6 +55,19 @@ pub fn append_memory(name: &str, content: &str) -> Result<usize> {
     Ok(line_count)
 }
 
+/// 覆盖写记忆文件（压缩/合并用 —— 谨慎：会丢弃历史）。
+pub fn write_memory_reset(name: &str, content: &str) -> Result<()> {
+    let path = safe_memory_path(name)
+        .ok_or_else(|| AresError::Config(format!("非法记忆文件名：{name}")))?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            AresError::Config(format!("无法创建记忆目录 {}: {e}", parent.display()))
+        })?;
+    }
+    std::fs::write(&path, content)
+        .map_err(|e| AresError::Config(format!("无法写入记忆 {}: {e}", path.display())))
+}
+
 /// 列出全部记忆文件（相对路径 + 大小）。
 pub fn list_memory() -> Vec<(String, u64)> {
     let mut out = Vec::new();

@@ -38,6 +38,8 @@ pub struct AgentLoop {
     history: Vec<Message>,
     /// 单次 turn 内最多允许的工具调用轮数，防止无限循环
     max_tool_rounds: usize,
+    /// 对话历史超过该条数时触发压缩（早期消息 LLM 摘要化）
+    compress_threshold: usize,
     /// 本会话累计 token 用量（run_turn 更新；handle_tool_call 写审计用）
     usage: tokio::sync::Mutex<Usage>,
     /// 当前正在执行的工具（GUI 进度显示；独立 std Mutex 不经主体锁）
@@ -77,6 +79,7 @@ impl AgentLoop {
             model: model.into(),
             history: vec![Message::system(system)],
             max_tool_rounds: 12,
+            compress_threshold: 40,
             usage: tokio::sync::Mutex::new(Usage::default()),
             progress: Arc::new(std::sync::Mutex::new(None)),
             cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -108,6 +111,10 @@ impl AgentLoop {
 
     /// 执行一次完整的对话轮次。
     pub async fn run_turn(&mut self, user_input: &str) -> Result<TurnResult> {
+        // 上下文管理：历史超长先压缩（早期消息摘要化）
+        if self.history.len() > self.compress_threshold {
+            let _ = self.compress_history().await;
+        }
         self.history.push(Message::user(user_input));
 
         let mut tool_runs = Vec::new();
@@ -472,6 +479,82 @@ impl AgentLoop {
     /// 当前会话历史长度，用于 M5 的压缩触发。
     pub fn history_len(&self) -> usize {
         self.history.len()
+    }
+
+    /// 上下文压缩：早期对话消息用 LLM 摘要替换（保留最近 keep_recent 条）。
+    /// 摘要以 system 消息注入，不改变角色语义。
+    pub async fn compress_history(&mut self) -> Result<()> {
+        let total = self.history.len();
+        if total <= self.compress_threshold {
+            return Ok(());
+        }
+        let keep_recent = 15usize;
+        let compress_end = total - keep_recent;
+        if compress_end <= 1 {
+            return Ok(());
+        }
+        let early: Vec<String> = self.history[1..compress_end]
+            .iter()
+            .map(|m| format!("[{:?}] {}", m.role, m.content))
+            .collect();
+        let transcript = early.join("\n");
+
+        let req = CompletionRequest::new(
+            &self.model,
+            vec![
+                Message::system(
+                    "把以下对话历史压缩成一段简洁摘要（≤200 字）。必须保留：\n\
+                     - 已完成的关键操作与结果\n\
+                     - 未完成事项 / 下一步\n\
+                     - 用户表达的任何偏好\n\
+                     - 与安全相关的任何信息（被拒操作、危险命令、注意事项）\n\
+                     - 重要环境事实\n\
+                     只输出摘要正文，不要任何前缀。",
+                ),
+                Message::user(transcript),
+            ],
+        );
+        let resp = self.provider.complete(req).await?;
+        let summary = resp.content.trim().to_string();
+        if summary.is_empty() {
+            return Ok(());
+        }
+
+        let system = self.history[0].clone();
+        let mut new_history = vec![system];
+        new_history.push(Message::system(format!(
+            "## 会话摘要（早期对话已压缩）\n\n{summary}"
+        )));
+        new_history.extend_from_slice(&self.history[compress_end..]);
+        self.history = new_history;
+        Ok(())
+    }
+
+    /// 记忆压缩：lessons.md 超过阈值时用 LLM 合并去重（保留结构）。
+    pub async fn compress_memory(&self) -> Result<()> {
+        const MAX_LINES: usize = 200;
+        let Some(lessons) = ares_core::memory::read_memory("lessons.md") else {
+            return Ok(());
+        };
+        if lessons.lines().count() <= MAX_LINES {
+            return Ok(());
+        }
+        let req = CompletionRequest::new(
+            &self.model,
+            vec![
+                Message::system(
+                    "合并以下运维经验条目：去除重复与过时项，同类合并，保留每条的原始含义。\
+                     输出 markdown 列表（每条 `- ...`），不超过 60 条。只输出列表正文。",
+                ),
+                Message::user(lessons),
+            ],
+        );
+        let resp = self.provider.complete(req).await?;
+        let merged = resp.content.trim().to_string();
+        if !merged.is_empty() {
+            let _ = ares_core::memory::write_memory_reset("lessons.md", &merged);
+        }
+        Ok(())
     }
 
     /// 自进化反思：从最近对话提炼记忆（facts/lessons/skill 草稿）。
