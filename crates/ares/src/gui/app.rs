@@ -5,11 +5,12 @@
 
 use crate::gui::approver::{GuiApprover, PendingApproval};
 use crate::gui::exec::{RoutedExecutor, TerminalSessionExecutor};
+use crate::gui::plan_approver::{settle_all, PlanApprover, PlanItem};
 use crate::gui::session::{ConnTarget, Session};
 use crate::gui::sftp::SftpPanel;
 use crate::gui::term;
 use crate::mcp::McpManager;
-use ares_agent::{AgentLoop, ApprovalResult, TurnResult};
+use ares_agent::{AgentLoop, ApprovalResult, Approver, TurnResult};
 use ares_core::config::{HostEntry, HostsConfig};
 use ares_core::ssh_config::{self, SshHost};
 use ares_core::{Decision, Env, HostId};
@@ -168,6 +169,10 @@ pub struct GuiApp {
     /// GUI 审批通道：agent 线程 → GUI 主线程
     approve_rx: std::sync::mpsc::Receiver<PendingApproval>,
     pending_approval: Option<PendingApproval>,
+    /// 计划审批模式（批次6）：多命令计划列表逐条/批量批准
+    plan_mode: bool,
+    plan_rx: std::sync::mpsc::Receiver<PlanItem>,
+    plan_items: Vec<PlanItem>,
 }
 
 struct AgentBridge {
@@ -232,6 +237,9 @@ impl GuiApp {
             egui_ctx: None,
             approve_rx: std::sync::mpsc::channel().1,
             pending_approval: None,
+            plan_mode: false,
+            plan_rx: std::sync::mpsc::channel().1,
+            plan_items: Vec::new(),
         }
     }
 
@@ -493,16 +501,22 @@ impl GuiApp {
                 HostId::new(host.clone()),
                 hosts_cfg,
             ));
-            // GUI 审批通道
-            let (approver, rx) = GuiApprover::pair();
-            self.approve_rx = rx;
+            // GUI 审批通道：plan 模式用计划队列，否则单命令弹窗
+            let approver: Arc<dyn Approver> = if self.plan_mode {
+                let (pa, rx) = PlanApprover::new();
+                self.plan_rx = rx;
+                self.plan_items.clear();
+                Arc::new(pa)
+            } else {
+                let (ga, rx) = GuiApprover::pair();
+                self.approve_rx = rx;
+                Arc::new(ga)
+            };
             let mcp_tools = self.mcp_tools.clone();
-            match self.rt.block_on(crate::build_agent(
-                scope,
-                executor,
-                Arc::new(approver),
-                mcp_tools,
-            )) {
+            match self
+                .rt
+                .block_on(crate::build_agent(scope, executor, approver, mcp_tools))
+            {
                 Ok(agent) => {
                     let mut bridge = AgentBridge::new(agent);
                     if let Some(msgs) = self.restore_msgs.take() {
@@ -832,6 +846,10 @@ impl eframe::App for GuiApp {
         while let Ok(p) = self.approve_rx.try_recv() {
             self.pending_approval = Some(p);
         }
+        // 计划模式轮询：agent 线程排队的计划命令
+        while let Ok(item) = self.plan_rx.try_recv() {
+            self.plan_items.push(item);
+        }
         if let Some(p) = &self.pending_approval {
             let mut approve = false;
             let mut reject = false;
@@ -1010,7 +1028,82 @@ impl eframe::App for GuiApp {
                                     .join("agent.jsonl"),
                             );
                         }
+                        // 计划审批模式开关（批次6）
+                        if ui
+                            .selectable_label(self.plan_mode, "📋 计划模式")
+                            .on_hover_text("agent 要执行的命令先进计划列表，逐条/批量批准后才执行")
+                            .clicked()
+                        {
+                            self.plan_mode = !self.plan_mode;
+                            self.agent = None;
+                            self.agent_open = false;
+                            self.plan_items.clear();
+                        }
                     });
+                    // 计划列表（plan 模式）：每条命令可单独批准/拒绝
+                    if self.plan_mode && !self.plan_items.is_empty() {
+                        ui.separator();
+                        ui.label(
+                            RichText::new(format!("📋 计划（{} 条待审批）", self.plan_items.len()))
+                                .strong(),
+                        );
+                        egui::ScrollArea::vertical()
+                            .id_salt("plan_list")
+                            .max_height(140.0)
+                            .show(ui, |ui| {
+                                let mut approve_one: Option<usize> = None;
+                                let mut reject_one: Option<usize> = None;
+                                let mut all_approve = false;
+                                let mut all_reject = false;
+                                for (i, item) in self.plan_items.iter().enumerate() {
+                                    ui.horizontal(|ui| {
+                                        ui.label(
+                                            RichText::new(item.req.host.to_string())
+                                                .small()
+                                                .color(Color32::GRAY),
+                                        );
+                                        ui.label(
+                                            RichText::new(&item.req.command).monospace().small(),
+                                        );
+                                        if ui.small_button("批准").clicked() {
+                                            approve_one = Some(i);
+                                        }
+                                        if ui.small_button("拒绝").clicked() {
+                                            reject_one = Some(i);
+                                        }
+                                    });
+                                }
+                                ui.horizontal(|ui| {
+                                    if ui.button("✅ 全部批准").clicked() {
+                                        all_approve = true;
+                                    }
+                                    if ui.button("⛔ 全部拒绝").clicked() {
+                                        all_reject = true;
+                                    }
+                                });
+                                if let Some(i) = approve_one {
+                                    let item = self.plan_items.remove(i);
+                                    let _ = item.respond.send(ApprovalResult::Approved);
+                                }
+                                if let Some(i) = reject_one {
+                                    let item = self.plan_items.remove(i);
+                                    let _ = item.respond.send(ApprovalResult::Rejected);
+                                }
+                                if all_approve {
+                                    settle_all(
+                                        std::mem::take(&mut self.plan_items),
+                                        ApprovalResult::Approved,
+                                    );
+                                }
+                                if all_reject {
+                                    settle_all(
+                                        std::mem::take(&mut self.plan_items),
+                                        ApprovalResult::Rejected,
+                                    );
+                                }
+                            });
+                        ui.separator();
+                    }
                     ui.separator();
 
                     if let Some(a) = &mut self.agent {
