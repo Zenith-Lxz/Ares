@@ -62,6 +62,7 @@ pub struct PromptBuilder {
     user_prefs: String,
     tool_specs: Vec<ToolSpec>,
     hosts: Vec<(HostId, String)>,
+    memory: String,
 }
 
 impl PromptBuilder {
@@ -78,6 +79,7 @@ impl PromptBuilder {
             user_prefs,
             tool_specs: vec![],
             hosts: vec![],
+            memory: String::new(),
         })
     }
 
@@ -89,6 +91,12 @@ impl PromptBuilder {
     /// 注入 scope 内的主机及其环境等级。
     pub fn with_hosts(mut self, hosts: Vec<(HostId, String)>) -> Self {
         self.hosts = hosts;
+        self
+    }
+
+    /// 注入记忆与技能概要（facts/lessons/skills 清单）。
+    pub fn with_memory(mut self, summary: String) -> Self {
+        self.memory = summary;
         self
     }
 
@@ -113,6 +121,13 @@ impl PromptBuilder {
         out.push_str("\n\n");
 
         // 4. 主机上下文
+        // 4.5 记忆与技能（可变内容，放缓存段之后）
+        if !self.memory.trim().is_empty() {
+            out.push_str("## 记忆与技能\n\n");
+            out.push_str(&self.memory);
+            out.push_str("\n\n");
+        }
+
         out.push_str("## 当前可操作的主机\n\n");
         if self.hosts.is_empty() {
             out.push_str(
@@ -147,6 +162,36 @@ pub fn install_defaults() -> Result<()> {
             std::fs::write(&path, content)?;
         }
     }
+
+    // 内置运维技能：首次安装到 config_dir/skills/（已存在不覆盖，
+    // 用户可自由编辑/删除；自进化生成的技能也在此目录）
+    install_skills()?;
+    let _ = ares_core::memory::ensure_dirs();
+    Ok(())
+}
+
+/// 把 `assets/skills/*/SKILL.md` 复制到配置目录（不覆盖已有）。
+fn install_skills() -> Result<()> {
+    let src = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../assets/skills");
+    let dst = paths::config_dir().join("skills");
+    let Ok(rd) = std::fs::read_dir(&src) else {
+        return Ok(()); // 开发环境可能没有 assets，静默跳过
+    };
+    for entry in rd.flatten() {
+        let name = entry.file_name();
+        let sk = entry.path().join("SKILL.md");
+        if !sk.exists() {
+            continue;
+        }
+        let target = dst.join(&name).join("SKILL.md");
+        if target.exists() {
+            continue; // 不覆盖用户已有的
+        }
+        if let Some(parent) = target.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::copy(&sk, &target);
+    }
     Ok(())
 }
 
@@ -171,6 +216,7 @@ mod tests {
             user_prefs: "USER_CONTENT".into(),
             tool_specs: vec![spec("terminal_execute")],
             hosts: vec![],
+            memory: String::new(),
         }
     }
 

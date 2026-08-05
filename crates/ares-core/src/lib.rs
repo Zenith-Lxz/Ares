@@ -5,6 +5,7 @@
 pub mod config;
 pub mod display;
 pub mod error;
+pub mod memory;
 pub mod paths;
 pub mod redact;
 pub mod ssh_config;

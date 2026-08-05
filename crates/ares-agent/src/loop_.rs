@@ -60,9 +60,13 @@ impl AgentLoop {
             .map(|h| (h.clone(), ctx.policy().env_of(h).to_string()))
             .collect();
 
+        // 记忆目录与技能目录就绪
+        let _ = ares_core::memory::ensure_dirs();
+
         let system = PromptBuilder::load()?
             .with_tools(registry.specs())
             .with_hosts(hosts)
+            .with_memory(ares_core::memory::memory_summary(80))
             .build();
 
         Ok(Self {
@@ -468,6 +472,32 @@ impl AgentLoop {
     /// 当前会话历史长度，用于 M5 的压缩触发。
     pub fn history_len(&self) -> usize {
         self.history.len()
+    }
+
+    /// 自进化反思：从最近对话提炼记忆（facts/lessons/skill 草稿）。
+    /// 返回原始提炼文本（调用方解析后写入记忆库）。
+    pub async fn reflect(&self, recent: &[(String, String)]) -> Result<String> {
+        let transcript = recent
+            .iter()
+            .map(|(r, t)| format!("[{r}] {t}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let req = CompletionRequest::new(
+            &self.model,
+            vec![
+                Message::system(
+                    "你是 ARES 运维 Agent 的反思模块。阅读最近对话，提炼值得长期记住的内容：\n\
+                     1. 稳定的环境事实 / 用户偏好 → FACTS\n\
+                     2. 踩坑 / 教训 / 成功模式 → LESSONS\n\
+                     3. 若发现可复用的重复任务流程 → SKILL_IF_ANY（给出 SKILL.md 草稿）\n\
+                     输出严格格式：\nFACTS:\n- ...\nLESSONS:\n- ...\nSKILL_IF_ANY:\n（无则省略）\n\
+                     只写有价值、稳定、不重复的内容；泛泛而谈不要写。",
+                ),
+                Message::user(transcript),
+            ],
+        );
+        let resp = self.provider.complete(req).await?;
+        Ok(resp.content)
     }
 
     /// 恢复历史消息（对话持久化：从存档载入的 user/assistant 消息）。

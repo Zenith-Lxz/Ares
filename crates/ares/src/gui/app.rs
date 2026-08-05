@@ -178,10 +178,14 @@ struct AgentBridge {
     progress_text: Option<String>,
     /// 已写入存档的消息条数（JSONL 增量追加）。
     saved_count: usize,
+    /// 已发送轮次（每 5 轮触发一次自进化反思）。
+    turns: usize,
 }
 
 enum AgentEvent {
     Turn(Result<TurnResult, String>),
+    /// 自进化反思结果（已写入记忆库的摘要）
+    Reflection(String),
 }
 
 impl GuiApp {
@@ -526,6 +530,7 @@ impl AgentBridge {
             cancel,
             progress_text: None,
             saved_count: 0,
+            turns: 0,
         }
     }
 
@@ -605,6 +610,9 @@ impl AgentBridge {
         self.cancel
             .store(false, std::sync::atomic::Ordering::Relaxed);
 
+        self.turns += 1;
+        let do_reflect = self.turns % 5 == 0;
+
         let agent = Arc::clone(&self.agent);
         let tx = self.tx.clone();
         rt.spawn(async move {
@@ -615,6 +623,34 @@ impl AgentBridge {
             tx.send(AgentEvent::Turn(result.map_err(|e| e.to_string())))
                 .ok();
         });
+
+        // 自进化：每 5 轮后台反思最近对话 → 提炼写入记忆库
+        if do_reflect {
+            let agent = Arc::clone(&self.agent);
+            let tx = self.tx.clone();
+            let recent = self
+                .messages
+                .iter()
+                .rev()
+                .take(20)
+                .cloned()
+                .collect::<Vec<_>>();
+            rt.spawn(async move {
+                let result = {
+                    let a = agent.lock().await;
+                    a.reflect(&recent).await
+                };
+                match result {
+                    Ok(raw) => {
+                        let summary = persist_reflection(&raw);
+                        let _ = tx.send(AgentEvent::Reflection(summary));
+                    }
+                    Err(_) => {
+                        // 反思失败静默（不影响主对话）
+                    }
+                }
+            });
+        }
     }
 
     /// 每帧收取完成的任务 + 刷新实时进度。
@@ -650,6 +686,10 @@ impl AgentBridge {
                 AgentEvent::Turn(Err(e)) => {
                     self.messages
                         .push(("assistant".into(), format!("错误：{e}")));
+                }
+                AgentEvent::Reflection(summary) => {
+                    self.messages
+                        .push(("system".into(), format!("🧠 {summary}")));
                 }
             }
             self.save_session();
@@ -1768,5 +1808,88 @@ fn human_size(bytes: u64) -> String {
         format!("{:.1} KB", b / KB)
     } else {
         format!("{bytes} B")
+    }
+}
+
+/// 解析反思输出并写入记忆库（FACTS/LESSONS/SKILL_IF_ANY 分节）。
+/// 返回给用户看的摘要。
+fn persist_reflection(raw: &str) -> String {
+    let mut facts = Vec::new();
+    let mut lessons = Vec::new();
+    let mut skill: Option<(String, String, String)> = None;
+    let mut section = "";
+
+    for line in raw.lines() {
+        let t = line.trim();
+        if t.starts_with("FACTS:") {
+            section = "facts";
+            continue;
+        }
+        if t.starts_with("LESSONS:") {
+            section = "lessons";
+            continue;
+        }
+        if t.starts_with("SKILL_IF_ANY:") {
+            section = "skill";
+            continue;
+        }
+        if t.starts_with('-') {
+            let item = t.trim_start_matches('-').trim().to_string();
+            if item.is_empty() {
+                continue;
+            }
+            match section {
+                "facts" => facts.push(item),
+                "lessons" => lessons.push(item),
+                "skill" => {
+                    // SKILL 段：逐行收集 frontmatter 与正文
+                    if skill.is_none() {
+                        skill =
+                            Some(("skill".into(), "自进化生成的技能草稿".into(), String::new()));
+                    }
+                    if let Some((_, _, body)) = &mut skill {
+                        body.push_str(line);
+                        body.push('\n');
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let mut n = 0usize;
+    if !facts.is_empty() {
+        let content = facts
+            .iter()
+            .map(|f| format!("- {f}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if ares_core::memory::append_memory("facts.md", &content).is_ok() {
+            n += facts.len();
+        }
+    }
+    if !lessons.is_empty() {
+        let content = lessons
+            .iter()
+            .map(|l| format!("- {l}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if ares_core::memory::append_memory("lessons.md", &content).is_ok() {
+            n += lessons.len();
+        }
+    }
+    if let Some((name, desc, body)) = skill {
+        if !body.trim().is_empty() {
+            let full = format!("---\nname: {name}\ndescription: {desc}\n---\n\n{body}");
+            if ares_core::memory::write_skill(&name, &full).is_ok() {
+                n += 1;
+            }
+        }
+    }
+
+    if n > 0 {
+        format!("自进化：已更新 {n} 条记忆（facts/lessons）")
+    } else {
+        "反思完成：无可新增的稳定记忆".to_string()
     }
 }

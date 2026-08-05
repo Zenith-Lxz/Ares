@@ -5,6 +5,7 @@
 
 pub mod budget;
 pub mod environment;
+pub mod memory_tools;
 pub mod registry;
 pub mod stored;
 pub mod terminal;
@@ -18,6 +19,10 @@ pub use test_support::test_ctx as test_support_ctx;
 
 pub use budget::{BudgetedOutput, OutputBudget};
 pub use environment::GetEnvironmentTool;
+pub use memory_tools::{
+    MemoryListTool, MemorySearchTool, MemoryWriteTool, SkillCreateTool, SkillListTool,
+    SkillViewTool,
+};
 pub use registry::{Tool, ToolContext, ToolOutput, ToolRegistry, ToolSpec};
 pub use stored::ReadStoredOutputTool;
 pub use terminal::{PreparedExec, TerminalExecuteTool};
@@ -31,6 +36,13 @@ pub fn default_registry() -> ToolRegistry {
     let mut r = ToolRegistry::new();
     r.register(Arc::new(TerminalExecuteTool::new()));
     r.register(Arc::new(ReadStoredOutputTool));
+    // 记忆与技能（2026-08-05 批次1：持久记忆 / 自进化 / skill）
+    r.register(Arc::new(MemoryWriteTool));
+    r.register(Arc::new(MemorySearchTool));
+    r.register(Arc::new(MemoryListTool));
+    r.register(Arc::new(SkillListTool));
+    r.register(Arc::new(SkillViewTool));
+    r.register(Arc::new(SkillCreateTool));
 
     let mut names: Vec<String> = r.names().iter().map(|s| s.to_string()).collect();
     names.push("get_environment".to_string());
@@ -45,13 +57,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_registry_has_three_tools() {
+    fn default_registry_has_full_toolset() {
         let r = default_registry();
         let mut names = r.names();
         names.sort();
         assert_eq!(
             names,
-            vec!["get_environment", "read_stored_output", "terminal_execute"]
+            vec![
+                "get_environment",
+                "memory_list",
+                "memory_search",
+                "memory_write",
+                "read_stored_output",
+                "skill_create",
+                "skill_list",
+                "skill_view",
+                "terminal_execute"
+            ]
         );
     }
 
