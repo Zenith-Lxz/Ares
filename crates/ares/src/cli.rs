@@ -14,6 +14,9 @@ pub enum Command {
     /// 初始化配置目录，写入默认的 SOUL.md 与 USER.md
     Init,
 
+    /// 进入本机纯对话模式（M1.5 起；默认入口是 TUI 主机列表）
+    Chat,
+
     /// 审计相关操作
     Audit {
         #[command(subcommand)]

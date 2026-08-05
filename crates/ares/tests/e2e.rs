@@ -98,9 +98,13 @@ fn audit_verify_detects_tampering() {
 }
 
 #[test]
-fn missing_providers_config_gives_actionable_error() {
+fn chat_missing_providers_config_gives_actionable_error() {
     let (_tmp, env) = temp_env();
-    let out = Command::new(ares_bin()).envs(env).output().unwrap();
+    let out = Command::new(ares_bin())
+        .args(["chat"])
+        .envs(env)
+        .output()
+        .unwrap();
 
     assert!(!out.status.success());
     let msg = String::from_utf8_lossy(&out.stderr);
@@ -108,4 +112,16 @@ fn missing_providers_config_gives_actionable_error() {
         msg.contains("providers.toml"),
         "错误信息应指出缺什么：{msg}"
     );
+}
+
+#[test]
+fn default_entry_requires_tty_and_mentions_chat() {
+    // M1.5 形态调整：`ares` 默认进 TUI 主机列表 —— 非 tty 环境下不启动
+    // TUI（避免 ratatui panic），提示用 `ares chat`。
+    let (_tmp, env) = temp_env();
+    let out = Command::new(ares_bin()).envs(env).output().unwrap();
+
+    assert!(out.status.success(), "非 tty 下应友好退出而非崩溃");
+    let msg = String::from_utf8_lossy(&out.stderr);
+    assert!(msg.contains("ares chat"), "应提示对话入口：{msg}");
 }

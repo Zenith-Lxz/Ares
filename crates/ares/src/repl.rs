@@ -80,9 +80,12 @@ fn render(r: &TurnResult) {
 
 pub async fn run(mut agent: AgentLoop) -> Result<()> {
     banner();
-    println!("  {}", fg(color::STONE, "输入问题开始对话，Ctrl-D 退出"));
-    println!();
+    println!("  {}\n", fg(color::STONE, "输入问题开始对话，Ctrl-D 退出"));
 
+    run_loop(&mut agent).await
+}
+
+async fn run_loop(agent: &mut AgentLoop) -> Result<()> {
     let stdin = io::stdin();
     loop {
         print!("{} ", fg(color::BRONZE, "❯"));

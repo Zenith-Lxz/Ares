@@ -1,4 +1,5 @@
 mod cli;
+mod gui;
 mod repl;
 
 use anyhow::{Context, Result};
@@ -6,7 +7,7 @@ use ares_agent::{AgentLoop, CliApprover};
 use ares_audit::AuditWriter;
 use ares_core::config::HostsConfig;
 use ares_core::{paths, AresError, HostId};
-use ares_exec::LocalExecutor;
+use ares_exec::{Executor, LocalExecutor, SshExecutor};
 use ares_llm::{AnthropicProvider, OpenAiProvider, Provider, ProviderKind, ProvidersConfig};
 use ares_policy::{PolicyConfig, PolicyEngine};
 use ares_tools::{default_registry, ToolContext};
@@ -15,8 +16,7 @@ use cli::{AuditAction, Cli, Command, ProviderAction};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_env("ARES_LOG")
@@ -28,10 +28,45 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Some(Command::Init) => cmd_init(),
+        Some(Command::Chat) => {
+            let rt = tokio::runtime::Runtime::new()?;
+            rt.block_on(cmd_chat())
+        }
         Some(Command::Audit { action }) => cmd_audit(action),
         Some(Command::Provider { action }) => cmd_provider(action),
-        None => cmd_interactive().await,
+        // M1.5 形态调整（2026-08-05 用户拍板）：默认入口 = 简易 iTerm2 GUI
+        None => {
+            use std::io::IsTerminal;
+            if !std::io::stdin().is_terminal() {
+                eprintln!(
+                    "\x1b[38;5;245mARES GUI 需要从终端启动（当前非 tty 环境）。\
+                     \n请直接运行 `ares`，或用 `ares chat` 开始本机对话。\x1b[0m"
+                );
+                Ok(())
+            } else {
+                run_gui()
+            }
+        }
     }
+}
+
+/// GUI 入口：eframe 窗口（多 tab 终端 + Agent 面板）。
+fn run_gui() -> Result<()> {
+    let rt = Arc::new(tokio::runtime::Runtime::new()?);
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([1080.0, 700.0])
+            .with_min_inner_size([640.0, 400.0])
+            .with_title("ARES — Autonomous Remote Engineering System"),
+        ..Default::default()
+    };
+    eframe::run_native(
+        "ARES",
+        options,
+        Box::new(move |cc| Ok(Box::new(gui::GuiApp::new(cc, rt.clone())))),
+    )
+    .map_err(|e| anyhow::anyhow!("GUI 启动失败：{e}"))?;
+    Ok(())
 }
 
 fn cmd_init() -> Result<()> {
@@ -47,7 +82,7 @@ fn cmd_init() -> Result<()> {
         paths::config_dir().display()
     );
     println!("  2. 运行 ares provider add <name> 写入 API key");
-    println!("  3. 运行 ares 开始对话");
+    println!("  3. 运行 ares 选择主机开始");
     Ok(())
 }
 
@@ -132,9 +167,19 @@ fn cmd_provider(action: ProviderAction) -> Result<()> {
     }
 }
 
-async fn cmd_interactive() -> Result<()> {
+/// `ares chat`：本机纯对话（M1 的原始 REPL 入口）。
+async fn cmd_chat() -> Result<()> {
     paths::ensure_dirs()?;
+    let agent = build_agent(vec![HostId::localhost()]).await?;
+    repl::run(agent).await?;
+    Ok(())
+}
 
+/// 公共构建：策略引擎 / provider / 审计 / 上下文。
+///
+/// executor 按 scope 选择：scope 全部为本机 → LocalExecutor；
+/// 含远端主机 → SshExecutor（M1.5 最小实现，M2 完善密钥/askpass）。
+pub(crate) async fn build_agent(scope: Vec<HostId>) -> Result<AgentLoop> {
     let hosts_cfg = HostsConfig::load()?;
     let policy_cfg = PolicyConfig::load()?;
     let policy = Arc::new(PolicyEngine::new(policy_cfg, hosts_cfg)?);
@@ -157,24 +202,19 @@ async fn cmd_interactive() -> Result<()> {
     let audit = Arc::new(Mutex::new(AuditWriter::open()?));
     let session_id = format!("sess-{}", ares_audit::now_rfc3339());
 
-    // M1 的 scope 固定为本机
-    let ctx = ToolContext::new(
-        Arc::new(LocalExecutor::new()),
-        policy,
-        audit,
-        vec![HostId::localhost()],
-        session_id,
-        "agent",
-    );
+    let executor: Arc<dyn Executor> = if scope.iter().all(|h| h.is_local()) {
+        Arc::new(LocalExecutor::new())
+    } else {
+        Arc::new(SshExecutor::new())
+    };
 
-    let agent = AgentLoop::new(
+    let ctx = ToolContext::new(executor, policy, audit, scope, session_id, "agent");
+
+    Ok(AgentLoop::new(
         provider,
         default_registry(),
         ctx,
         Arc::new(CliApprover::new()),
         &entry.model,
-    )?;
-
-    repl::run(agent).await?;
-    Ok(())
+    )?)
 }
