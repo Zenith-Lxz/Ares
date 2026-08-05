@@ -19,16 +19,78 @@ use std::sync::Arc;
 
 const MONO: FontId = FontId::monospace(14.0);
 
-/// 一个 tab：终端会话或 SFTP 面板。
+/// 分割方向。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Split {
+    /// 上下分（两个 pane 水平堆叠）
+    Horizontal,
+    /// 左右分（两个 pane 垂直堆叠）
+    Vertical,
+}
+
+/// 一个终端 tab 的工作区：1~2 个 pane（分屏）。
+struct TermWorkspace {
+    sessions: Vec<Session>,
+    active: usize,
+    split: Option<Split>,
+    /// 每个 pane 上次渲染尺寸（resize 检测）。
+    last_sizes: Vec<Option<(u16, u16)>>,
+}
+
+impl TermWorkspace {
+    fn new(s: Session) -> Self {
+        Self {
+            sessions: vec![s],
+            active: 0,
+            split: None,
+            last_sizes: vec![None],
+        }
+    }
+
+    fn title(&self) -> &str {
+        &self.sessions[self.active].alias
+    }
+
+    fn is_exited(&self) -> bool {
+        self.sessions.iter().any(|s| s.is_exited())
+    }
+
+    /// 分屏：把新会话加为第二个 pane。已有 split 时替换第二个。
+    fn split_with(&mut self, s: Session, dir: Split) {
+        if self.sessions.len() == 2 {
+            self.sessions[1] = s;
+        } else {
+            self.sessions.push(s);
+        }
+        self.split = Some(dir);
+        self.active = self.sessions.len() - 1;
+        self.last_sizes = vec![None; self.sessions.len()];
+    }
+
+    /// 关闭当前 pane；剩一个时取消 split。
+    fn close_active_pane(&mut self) {
+        if self.sessions.len() == 1 {
+            return;
+        }
+        self.sessions.remove(self.active);
+        if self.active >= self.sessions.len() {
+            self.active = 0;
+        }
+        self.split = None;
+        self.last_sizes = vec![None; self.sessions.len()];
+    }
+}
+
+/// 一个 tab：终端工作区或 SFTP 面板。
 enum Tab {
-    Term(Session),
+    Term(TermWorkspace),
     Sftp(SftpPanel),
 }
 
 impl Tab {
     fn title(&self) -> &str {
         match self {
-            Tab::Term(s) => &s.alias,
+            Tab::Term(w) => w.title(),
             Tab::Sftp(p) => &p.title,
         }
     }
@@ -84,6 +146,8 @@ pub struct GuiApp {
     settings_fields: SettingsFields,
     error_toast: Option<String>,
     agent_open: bool,
+    /// 分屏待定方向：用户按分屏快捷键后进入主机选择，选中即分屏。
+    split_pending: Option<Split>,
     agent: Option<AgentBridge>,
     rt: Arc<tokio::runtime::Runtime>,
     /// 供读线程触发的重画句柄（Session 构造时使用）。
@@ -129,6 +193,7 @@ impl GuiApp {
             settings_fields: SettingsFields::default(),
             error_toast: None,
             agent_open: false,
+            split_pending: None,
             agent: None,
             rt,
             egui_ctx: None,
@@ -159,9 +224,18 @@ impl GuiApp {
             }),
             None => Arc::new(|| {}),
         };
+        let dir = self.split_pending.take();
         match Session::open(key, &target, 24, 80, repaint) {
             Ok(s) => {
-                self.tabs.push(Tab::Term(s));
+                if let Some(dir) = dir {
+                    // 分屏：加为当前 tab 的第二个 pane
+                    if let Some(Tab::Term(w)) = self.tabs.get_mut(self.active) {
+                        w.split_with(s, dir);
+                        self.picking = false;
+                        return;
+                    }
+                }
+                self.tabs.push(Tab::Term(TermWorkspace::new(s)));
                 self.active = self.tabs.len() - 1;
                 self.picking = false;
             }
@@ -212,12 +286,21 @@ impl GuiApp {
         };
         match Session::open_local(24, 80, repaint) {
             Ok(s) => {
-                self.tabs.push(Tab::Term(s));
+                self.tabs.push(Tab::Term(TermWorkspace::new(s)));
                 self.active = self.tabs.len() - 1;
                 self.picking = false;
             }
             Err(e) => eprintln!("无法打开本地终端：{e}"),
         }
+    }
+
+    /// 分屏快捷键：设置方向 + 打开主机选择。
+    fn start_split(&mut self, dir: Split) {
+        if self.tabs.is_empty() {
+            return;
+        }
+        self.split_pending = Some(dir);
+        self.picking = true;
     }
 
     /// 保存主机簿到 hosts.toml（失败仅告警，不打断 GUI）。
@@ -236,10 +319,17 @@ impl GuiApp {
         self.save_hosts();
     }
 
-    /// 关闭当前 tab。
+    /// 关闭当前 tab（分屏时先关 pane）。
     fn close_active(&mut self) {
         if self.tabs.is_empty() {
             return;
+        }
+        // 分屏 tab：先关 pane；只剩一个 pane 时正常关 tab
+        if let Some(Tab::Term(ws)) = self.tabs.get_mut(self.active) {
+            if ws.sessions.len() > 1 {
+                ws.close_active_pane();
+                return;
+            }
         }
         self.tabs.remove(self.active);
         if self.active >= self.tabs.len() && !self.tabs.is_empty() {
@@ -257,8 +347,8 @@ impl GuiApp {
         for ev in events {
             match ev {
                 egui::Event::Text(t) => {
-                    if let Some(Tab::Term(s)) = self.tabs.get(self.active) {
-                        s.write(t.as_bytes());
+                    if let Some(Tab::Term(w)) = self.tabs.get(self.active) {
+                        w.sessions[w.active].write(t.as_bytes());
                     }
                 }
                 egui::Event::Key { key, modifiers, .. } => {
@@ -274,6 +364,16 @@ impl GuiApp {
                                 self.close_active();
                                 continue;
                             }
+                            egui::Key::D if modifiers.shift => {
+                                // Ctrl+Shift+D：垂直分屏（左右）
+                                self.start_split(Split::Vertical);
+                                continue;
+                            }
+                            egui::Key::E if modifiers.shift => {
+                                // Ctrl+Shift+E：水平分屏（上下）
+                                self.start_split(Split::Horizontal);
+                                continue;
+                            }
                             egui::Key::A => {
                                 // Ctrl-a a 切 Agent 面板（egui 事件流里 Ctrl+a
                                 // 与后续 a 分离，这里直接以 Ctrl-a 唤起）
@@ -284,9 +384,9 @@ impl GuiApp {
                         }
                     }
                     // 转发给当前终端会话（可打印字符已走 Event::Text；SFTP 面板不转发）
-                    if let Some(Tab::Term(s)) = self.tabs.get(self.active) {
+                    if let Some(Tab::Term(w)) = self.tabs.get(self.active) {
                         if let Some(bytes) = key_bytes(key, ctrl) {
-                            s.write(&bytes);
+                            w.sessions[w.active].write(&bytes);
                         }
                     }
                 }
@@ -301,9 +401,10 @@ impl GuiApp {
         }
         self.agent_open = !self.agent_open;
         if self.agent_open && self.agent.is_none() {
-            let Tab::Term(session) = &self.tabs[self.active] else {
+            let Tab::Term(ws) = &self.tabs[self.active] else {
                 return; // SFTP 面板不挂 Agent
             };
+            let session = &ws.sessions[ws.active];
             let host = session.alias.clone();
             // 终端注入执行器：agent 的命令直接写进当前终端会话
             // （Session 内部状态全 Arc 共享，clone 后注入的是同一个会话）
@@ -552,7 +653,7 @@ impl eframe::App for GuiApp {
                 let mut to_activate: Option<usize> = None;
                 for (i, t) in self.tabs.iter().enumerate() {
                     let selected = i == self.active;
-                    let exited = matches!(t, Tab::Term(s) if s.is_exited());
+                    let exited = matches!(t, Tab::Term(w) if w.is_exited());
                     let label = if exited {
                         format!("✗ {}", t.title())
                     } else {
@@ -592,16 +693,18 @@ impl eframe::App for GuiApp {
             ui.horizontal(|ui| {
                 if let Some(t) = self.tabs.get(self.active) {
                     let (label, color) = match t {
-                        Tab::Term(s) => {
-                            let st = if s.is_exited() {
+                        Tab::Term(w) => {
+                            let st = if w.is_exited() {
                                 "已退出"
                             } else {
                                 "已连接"
                             };
-                            (
-                                format!("{} · {st}", s.alias),
-                                Color32::from_rgb(179, 146, 74),
-                            )
+                            let panes = if w.sessions.len() > 1 {
+                                format!("{} ({}pane)", w.title(), w.sessions.len())
+                            } else {
+                                w.title().to_string()
+                            };
+                            (format!("{panes} · {st}"), Color32::from_rgb(179, 146, 74))
                         }
                         Tab::Sftp(p) => (
                             format!("{} · SFTP", p.title),
@@ -700,15 +803,76 @@ impl eframe::App for GuiApp {
         // ── 中央：终端渲染 ──
         egui::CentralPanel::default().show(ctx, |ui| {
             match self.tabs.get_mut(self.active) {
-                Some(Tab::Term(s)) => {
-                    // 尺寸变化 → resize 会话
-                    let (rows, cols) = term::size_for(ui, &MONO);
-                    if self.last_size != Some((rows, cols)) {
-                        s.resize(rows, cols);
-                        self.last_size = Some((rows, cols));
+                Some(Tab::Term(ws)) => {
+                    let n = ws.sessions.len();
+                    if n == 1 {
+                        // 单 pane：尺寸变化 → resize 会话
+                        let (rows, cols) = term::size_for(ui, &MONO);
+                        if self.last_size != Some((rows, cols)) {
+                            ws.sessions[0].resize(rows, cols);
+                            self.last_size = Some((rows, cols));
+                        }
+                        let screen = ws.sessions[0].screen();
+                        term::draw_terminal(ui, &screen, MONO);
+                    } else {
+                        // 分屏：按方向均分区域，每个 pane 独立渲染
+                        let split = ws.split.unwrap_or(Split::Vertical);
+                        let rect = ui.available_rect_before_wrap();
+                        let is_v = split == Split::Vertical;
+                        let half = if is_v {
+                            rect.width() * 0.5
+                        } else {
+                            rect.height() * 0.5
+                        };
+                        for (i, s) in ws.sessions.iter().enumerate() {
+                            let r = if is_v {
+                                egui::Rect::from_min_size(
+                                    rect.min + egui::vec2(i as f32 * half, 0.0),
+                                    egui::vec2(half, rect.height()),
+                                )
+                            } else {
+                                egui::Rect::from_min_size(
+                                    rect.min + egui::vec2(0.0, i as f32 * half),
+                                    egui::vec2(rect.width(), half),
+                                )
+                            };
+                            // 点击切换 active pane
+                            let id = ui.id().with(("pane", i));
+                            if ui.interact(r, id, egui::Sense::click()).clicked() {
+                                ws.active = i;
+                            }
+                            let mut child =
+                                ui.new_child(egui::UiBuilder::new().max_rect(r.shrink(if is_v {
+                                    1.0
+                                } else {
+                                    0.0
+                                })));
+                            let (rows, cols) = term::size_for(&child, &MONO);
+                            if ws.last_sizes[i] != Some((rows, cols)) {
+                                s.resize(rows, cols);
+                                ws.last_sizes[i] = Some((rows, cols));
+                            }
+                            let screen = s.screen();
+                            term::draw_terminal(&mut child, &screen, MONO);
+                        }
+                        // 分割线
+                        let mid = if is_v {
+                            egui::Pos2::new(rect.min.x + half, rect.min.y)
+                        } else {
+                            egui::Pos2::new(rect.min.x, rect.min.y + half)
+                        };
+                        ui.painter().line_segment(
+                            [
+                                mid,
+                                if is_v {
+                                    egui::Pos2::new(mid.x, rect.max.y)
+                                } else {
+                                    egui::Pos2::new(rect.max.x, mid.y)
+                                },
+                            ],
+                            egui::Stroke::new(1.0_f32, Color32::from_rgb(70, 70, 80)),
+                        );
                     }
-                    let screen = s.screen();
-                    term::draw_terminal(ui, &screen, MONO);
                 }
                 Some(Tab::Sftp(p)) => {
                     p.poll();
