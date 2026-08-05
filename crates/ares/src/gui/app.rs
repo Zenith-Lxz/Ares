@@ -173,6 +173,8 @@ pub struct GuiApp {
     plan_mode: bool,
     plan_rx: std::sync::mpsc::Receiver<PlanItem>,
     plan_items: Vec<PlanItem>,
+    /// Agent 回复 markdown 渲染缓存（批次7）
+    md_cache: egui_commonmark::CommonMarkCache,
 }
 
 struct AgentBridge {
@@ -240,6 +242,7 @@ impl GuiApp {
             plan_mode: false,
             plan_rx: std::sync::mpsc::channel().1,
             plan_items: Vec::new(),
+            md_cache: egui_commonmark::CommonMarkCache::default(),
         }
     }
 
@@ -1106,6 +1109,7 @@ impl eframe::App for GuiApp {
                     }
                     ui.separator();
 
+                    let md_cache = &mut self.md_cache;
                     if let Some(a) = &mut self.agent {
                         // 消息区：限制高度，给底部输入区留空间（否则被挤出面板）
                         let input_h = 60.0;
@@ -1122,8 +1126,15 @@ impl eframe::App for GuiApp {
                                         _ => Color32::from_rgb(220, 220, 220),
                                     };
                                     ui.label(RichText::new(format!("[{role}]")).color(color));
-                                    for line in text.lines() {
-                                        ui.label(line);
+                                    // assistant 消息用 markdown 渲染（代码块/列表/表格更清晰），
+                                    // 其他角色保持纯文本
+                                    if role == "assistant" {
+                                        egui_commonmark::CommonMarkViewer::new()
+                                            .show(ui, md_cache, text);
+                                    } else {
+                                        for line in text.lines() {
+                                            ui.label(line);
+                                        }
                                     }
                                     ui.add_space(4.0);
                                 }
