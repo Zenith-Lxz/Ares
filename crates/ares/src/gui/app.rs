@@ -151,6 +151,25 @@ impl GuiApp {
         }
     }
 
+    /// 打开本地终端 tab（无需主机簿条目）。
+    fn open_local_tab(&mut self) {
+        let repaint: Arc<dyn Fn() + Send + Sync> = match &self.egui_ctx {
+            Some(ctx) => Arc::new({
+                let ctx = ctx.clone();
+                move || ctx.request_repaint()
+            }),
+            None => Arc::new(|| {}),
+        };
+        match Session::open_local(24, 80, repaint) {
+            Ok(s) => {
+                self.tabs.push(s);
+                self.active = self.tabs.len() - 1;
+                self.picking = false;
+            }
+            Err(e) => eprintln!("无法打开本地终端：{e}"),
+        }
+    }
+
     /// 保存主机簿到 hosts.toml（失败仅告警，不打断 GUI）。
     fn save_hosts(&self) {
         let cfg = HostsConfig {
@@ -562,6 +581,10 @@ impl eframe::App for GuiApp {
                         if ui.button("从 ssh_config 导入").clicked() {
                             open_import = true;
                         }
+                        if ui.button("🖥 本地终端").clicked() {
+                            self.open_local_tab();
+                            close = true;
+                        }
                     });
                     ui.add(
                         egui::TextEdit::singleline(&mut self.filter)
@@ -570,7 +593,8 @@ impl eframe::App for GuiApp {
                     );
                     ui.separator();
                     let f = self.filter.to_lowercase();
-                    let vis: Vec<String> = self
+                    // 按环境分组（Netcatty Vault 风格），组内保持字典序
+                    let mut vis: Vec<(Env, String)> = self
                         .hosts
                         .iter()
                         .filter(|(k, e)| {
@@ -579,25 +603,40 @@ impl eframe::App for GuiApp {
                                 || e.hostname.to_lowercase().contains(&f)
                                 || e.user.to_lowercase().contains(&f)
                         })
-                        .map(|(k, _)| k.clone())
+                        .map(|(k, e)| (e.env, k.clone()))
                         .collect();
+                    vis.sort_by(|a, b| {
+                        env_order(&a.0)
+                            .cmp(&env_order(&b.0))
+                            .then_with(|| a.1.cmp(&b.1))
+                    });
 
                     egui::ScrollArea::vertical()
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
-                            for (i, key) in vis.iter().enumerate() {
+                            let mut last_env: Option<Env> = None;
+                            for (idx, (env, key)) in vis.iter().enumerate() {
+                                if last_env != Some(*env) {
+                                    ui.add_space(4.0);
+                                    ui.label(
+                                        RichText::new(env_label(*env))
+                                            .color(Color32::from_rgb(120, 120, 130))
+                                            .small(),
+                                    );
+                                    last_env = Some(*env);
+                                }
                                 let e = &self.hosts[key];
                                 let target = e.connect_target(key);
                                 let label = format!("{key}  ·  {target}");
                                 let row =
-                                    ui.selectable_label(self.filter_selected == Some(i), label);
+                                    ui.selectable_label(self.filter_selected == Some(idx), label);
                                 if row.double_clicked() {
                                     self.open_tab(key);
                                     close = true;
                                     break;
                                 }
                                 if row.clicked() {
-                                    self.filter_selected = Some(i);
+                                    self.filter_selected = Some(idx);
                                 }
                             }
                             if vis.is_empty() {
@@ -616,7 +655,7 @@ impl eframe::App for GuiApp {
                             && self.filter_selected.is_some()
                             && self.filter_selected.unwrap() < vis.len()
                         {
-                            let key = vis[self.filter_selected.unwrap()].clone();
+                            let key = vis[self.filter_selected.unwrap()].1.clone();
                             self.open_tab(&key);
                             close = true;
                         }
@@ -1026,6 +1065,28 @@ fn install_fonts(ctx: &egui::Context) {
         }
     }
     ctx.set_fonts(fonts);
+}
+
+/// 环境分组顺序（prod 最前，unknown 最后）。
+fn env_order(e: &Env) -> u8 {
+    match e {
+        Env::Prod => 0,
+        Env::Staging => 1,
+        Env::Dev => 2,
+        Env::Local => 3,
+        Env::Unknown => 4,
+    }
+}
+
+/// 环境分组标题文本。
+fn env_label(e: Env) -> &'static str {
+    match e {
+        Env::Prod => "▍生产 prod",
+        Env::Staging => "▍预发 staging",
+        Env::Dev => "▍开发 dev",
+        Env::Local => "▍本机 local",
+        Env::Unknown => "▍未标注",
+    }
 }
 
 /// Decision 的简短标签（确认弹窗展示用）。

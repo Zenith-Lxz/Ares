@@ -40,14 +40,6 @@ impl Session {
         cols: u16,
         repaint: Arc<dyn Fn() + Send + Sync>,
     ) -> anyhow::Result<Self> {
-        let pty_system = native_pty_system();
-        let pair = pty_system.openpty(PtySize {
-            rows,
-            cols,
-            pixel_width: 0,
-            pixel_height: 0,
-        })?;
-
         let mut cmd = CommandBuilder::new("ssh");
         if let Some(p) = target.port {
             if p != 22 {
@@ -65,6 +57,39 @@ impl Session {
             None => hostname,
         };
         cmd.arg(dest);
+        Self::open_command(alias, cmd, rows, cols, repaint)
+    }
+
+    /// 本地终端会话（Netcatty 的 local terminal 功能）。
+    pub fn open_local(
+        rows: u16,
+        cols: u16,
+        repaint: Arc<dyn Fn() + Send + Sync>,
+    ) -> anyhow::Result<Self> {
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into());
+        let mut cmd = CommandBuilder::new(&shell);
+        if shell.ends_with("bash") || shell.ends_with("zsh") {
+            cmd.arg("-l"); // 登录 shell，加载用户环境
+        }
+        Self::open_command("本地", cmd, rows, cols, repaint)
+    }
+
+    /// 通用：spawn 任意命令进 pty。
+    fn open_command(
+        alias: &str,
+        cmd: CommandBuilder,
+        rows: u16,
+        cols: u16,
+        repaint: Arc<dyn Fn() + Send + Sync>,
+    ) -> anyhow::Result<Self> {
+        let pty_system = native_pty_system();
+        let pair = pty_system.openpty(PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        })?;
+
         let child = pair.slave.spawn_command(cmd)?;
         drop(pair.slave);
 
