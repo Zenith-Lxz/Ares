@@ -14,7 +14,6 @@ use ares_agent::{ApprovalRequest, ApprovalResult, Approver};
 use ares_core::{AresError, Result};
 use async_trait::async_trait;
 use std::sync::mpsc::{Receiver, Sender};
-use std::sync::Mutex;
 
 /// 计划中的一条审批请求。
 pub struct PlanItem {
@@ -24,8 +23,6 @@ pub struct PlanItem {
 
 /// 计划审批器：请求入队 + 阻塞等待 GUI 逐条放行。
 pub struct PlanApprover {
-    /// GUI 主线程轮询取走
-    pub rx: Mutex<Receiver<PlanItem>>,
     tx: Sender<PlanItem>,
 }
 
@@ -33,13 +30,7 @@ impl PlanApprover {
     /// 构造（approver + GUI 接收端）。
     pub fn new() -> (Self, Receiver<PlanItem>) {
         let (tx, rx) = std::sync::mpsc::channel();
-        (
-            Self {
-                rx: Mutex::new(std::sync::mpsc::channel().1),
-                tx,
-            },
-            rx,
-        )
+        (Self { tx }, rx)
     }
 }
 
@@ -68,6 +59,6 @@ impl Approver for PlanApprover {
 /// 批量放行辅助：向所有已排队条目发送结果（GUI 全部批准/拒绝用）。
 pub fn settle_all(items: Vec<PlanItem>, result: ApprovalResult) {
     for it in items {
-        let _ = it.respond.send(result.clone());
+        let _ = it.respond.send(result);
     }
 }
