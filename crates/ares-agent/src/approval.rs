@@ -10,9 +10,12 @@ use regex::Regex;
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::sync::LazyLock;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApprovalResult {
     Approved,
+    /// 批准并携带编辑后的命令文本（plan 模式：用户改过命令再批准；
+    /// 执行前会**重新走策略判定**，编辑后的命令不能绕过审批）
+    ApprovedWithEdit(String),
     Rejected,
     Timeout,
 }
@@ -22,6 +25,9 @@ impl ApprovalResult {
     pub fn audit_label(self, decision: &Decision) -> String {
         match self {
             ApprovalResult::Approved => decision.label().to_string(),
+            ApprovalResult::ApprovedWithEdit(_) => {
+                format!("{}-edited", decision.label())
+            }
             ApprovalResult::Rejected => "rejected".to_string(),
             ApprovalResult::Timeout => "timeout".to_string(),
         }
@@ -225,7 +231,7 @@ impl Approver for AutoApprover {
         if let Decision::Deny { reason } = &req.decision {
             return Err(AresError::Denied(reason.clone()));
         }
-        Ok(self.answer)
+        Ok(self.answer.clone())
     }
 }
 

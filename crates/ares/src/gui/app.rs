@@ -1102,23 +1102,57 @@ impl eframe::App for GuiApp {
                                 let mut reject_one: Option<usize> = None;
                                 let mut all_approve = false;
                                 let mut all_reject = false;
-                                for (i, item) in self.plan_items.iter().enumerate() {
+                                let mut toggle_edit: Option<usize> = None;
+                                for (i, item) in self.plan_items.iter_mut().enumerate() {
                                     ui.horizontal(|ui| {
                                         ui.label(
                                             RichText::new(item.req.host.to_string())
                                                 .small()
                                                 .color(Color32::GRAY),
                                         );
-                                        ui.label(
-                                            RichText::new(&item.req.command).monospace().small(),
-                                        );
+                                        let shown = item
+                                            .pending_edit
+                                            .clone()
+                                            .unwrap_or_else(|| item.req.command.clone());
+                                        ui.label(RichText::new(&shown).monospace().small());
                                         if ui.small_button("批准").clicked() {
                                             approve_one = Some(i);
                                         }
                                         if ui.small_button("拒绝").clicked() {
                                             reject_one = Some(i);
                                         }
+                                        if ui.small_button("✏️ 编辑").clicked() {
+                                            toggle_edit = Some(i);
+                                        }
                                     });
+                                    // 编辑态：命令输入框（首次点击编辑时预填原命令）
+                                    if let Some(editing) = item.pending_edit.as_mut() {
+                                        ui.text_edit_singleline(editing);
+                                    }
+                                    // 注释/备注（仅展示，不影响执行）
+                                    ui.horizontal(|ui| {
+                                        ui.label(
+                                            RichText::new("备注：").small().color(Color32::GRAY),
+                                        );
+                                        ui.add(
+                                            egui::TextEdit::singleline(&mut item.note)
+                                                .desired_width(120.0),
+                                        );
+                                    });
+                                    if !item.note.is_empty() {
+                                        ui.label(
+                                            RichText::new(format!("💬 {}", item.note))
+                                                .small()
+                                                .color(Color32::from_rgb(120, 170, 220)),
+                                        );
+                                    }
+                                }
+                                if let Some(i) = toggle_edit {
+                                    if let Some(item) = self.plan_items.get_mut(i) {
+                                        if item.pending_edit.is_none() {
+                                            item.pending_edit = Some(item.req.command.clone());
+                                        }
+                                    }
                                 }
                                 ui.horizontal(|ui| {
                                     if ui.button("✅ 全部批准").clicked() {
@@ -1130,7 +1164,19 @@ impl eframe::App for GuiApp {
                                 });
                                 if let Some(i) = approve_one {
                                     let item = self.plan_items.remove(i);
-                                    let _ = item.respond.send(ApprovalResult::Approved);
+                                    // 编辑过 → ApprovedWithEdit（agent 侧重新判定后执行）
+                                    if let Some(edited) = item.pending_edit {
+                                        let edited = edited.trim().to_string();
+                                        if !edited.is_empty() && edited != item.req.command {
+                                            let _ = item
+                                                .respond
+                                                .send(ApprovalResult::ApprovedWithEdit(edited));
+                                        } else {
+                                            let _ = item.respond.send(ApprovalResult::Approved);
+                                        }
+                                    } else {
+                                        let _ = item.respond.send(ApprovalResult::Approved);
+                                    }
                                 }
                                 if let Some(i) = reject_one {
                                     let item = self.plan_items.remove(i);

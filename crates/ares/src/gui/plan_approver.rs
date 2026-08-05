@@ -19,6 +19,10 @@ use std::sync::mpsc::{Receiver, Sender};
 pub struct PlanItem {
     pub req: ApprovalRequest,
     pub respond: Sender<ApprovalResult>,
+    /// 用户编辑后的命令（GUI 编辑态；批准时随 ApprovedWithEdit 回传）
+    pub pending_edit: Option<String>,
+    /// 用户注释/备注（仅展示，不影响执行）
+    pub note: String,
 }
 
 /// 计划审批器：请求入队 + 阻塞等待 GUI 逐条放行。
@@ -42,6 +46,8 @@ impl Approver for PlanApprover {
             .send(PlanItem {
                 req: req.clone(),
                 respond: respond_tx,
+                pending_edit: None,
+                note: String::new(),
             })
             .map_err(|_| AresError::ApprovalRejected)?;
 
@@ -59,6 +65,6 @@ impl Approver for PlanApprover {
 /// 批量放行辅助：向所有已排队条目发送结果（GUI 全部批准/拒绝用）。
 pub fn settle_all(items: Vec<PlanItem>, result: ApprovalResult) {
     for it in items {
-        let _ = it.respond.send(result);
+        let _ = it.respond.send(result.clone());
     }
 }

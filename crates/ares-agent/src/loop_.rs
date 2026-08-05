@@ -298,6 +298,8 @@ impl AgentLoop {
 
         let (approved, label, note) = match approval {
             Ok(ApprovalResult::Approved) => (true, decision.label().to_string(), None),
+            // 非 terminal 工具没有命令文本可编辑；编辑内容忽略，视为批准
+            Ok(ApprovalResult::ApprovedWithEdit(_)) => (true, decision.label().to_string(), None),
             Ok(ApprovalResult::Rejected) => (
                 false,
                 "rejected".to_string(),
@@ -364,67 +366,104 @@ impl AgentLoop {
     async fn handle_terminal_execute(&self, call: &ToolCall) -> (ToolRun, Message) {
         let exec_tool = TerminalExecuteTool::new();
 
-        // ── 1. 判定 ──
-        let prepared = match exec_tool.prepare(&self.ctx, &call.arguments) {
-            Ok(p) => p,
-            Err(e) => {
-                let msg = e.to_string();
-                return (
-                    ToolRun {
-                        tool: call.name.clone(),
-                        command: call.arguments["command"].as_str().map(String::from),
-                        decision_label: "error".into(),
-                        display: msg.clone(),
-                        success: false,
-                    },
-                    Message::tool(call.id.clone(), format!("错误：{msg}")),
-                );
+        // ── 1+2. 判定 + 审批（2026-08-05 plan 编辑：用户编辑后的命令
+        //         重新走策略判定 —— 编辑不能绕过审批）──
+        let mut arguments = call.arguments.clone();
+        let (prepared, approved, label, note) = loop {
+            let prepared = match exec_tool.prepare(&self.ctx, &arguments) {
+                Ok(p) => p,
+                Err(e) => {
+                    let msg = e.to_string();
+                    return (
+                        ToolRun {
+                            tool: call.name.clone(),
+                            command: arguments["command"].as_str().map(String::from),
+                            decision_label: "error".into(),
+                            display: msg.clone(),
+                            success: false,
+                        },
+                        Message::tool(call.id.clone(), format!("错误：{msg}")),
+                    );
+                }
+            };
+
+            let host = prepared.request.host.clone();
+            let command = prepared.request.command.clone();
+            let decision = prepared.decision.clone();
+
+            let approval = self
+                .approver
+                .ask(&ApprovalRequest {
+                    host: host.clone(),
+                    env: self.ctx.policy().env_of(&host),
+                    command: command.clone(),
+                    decision: decision.clone(),
+                    host_count: 1,
+                    // 极高危命令（spec §14.2）：确认之外还要手打主机名
+                    require_typed_host: self.ctx.policy().is_critical(&command),
+                })
+                .await;
+
+            match approval {
+                Ok(ApprovalResult::Approved) => {
+                    break (prepared, true, decision.label().to_string(), None);
+                }
+                Ok(ApprovalResult::ApprovedWithEdit(edited)) => {
+                    // plan 模式：用户修改了命令 → 替换并重新判定（安全链不跳过）
+                    if let Some(obj) = arguments.as_object_mut() {
+                        obj.insert(
+                            "command".to_string(),
+                            serde_json::Value::String(edited.trim().to_string()),
+                        );
+                    }
+                    continue;
+                }
+                Ok(ApprovalResult::Rejected) => {
+                    break (
+                        prepared,
+                        false,
+                        "rejected".to_string(),
+                        Some(
+                            "用户拒绝了此操作。不要重试，也不要换一种写法达到同样效果。"
+                                .to_string(),
+                        ),
+                    );
+                }
+                Ok(ApprovalResult::Timeout) => {
+                    break (
+                        prepared,
+                        false,
+                        "timeout".to_string(),
+                        Some("审批超时，操作未执行。".to_string()),
+                    );
+                }
+                Err(AresError::Denied(reason)) => {
+                    break (
+                        prepared,
+                        false,
+                        "deny".to_string(),
+                        Some(format!(
+                            "此操作被安全策略禁止：{reason}\n\
+                             不要尝试变形、拆分或用其他工具达到同样效果。\
+                             直接告诉用户这件事需要人工执行。"
+                        )),
+                    );
+                }
+                Err(e) => {
+                    break (
+                        prepared,
+                        false,
+                        "error".to_string(),
+                        Some(format!("审批失败：{e}")),
+                    );
+                }
             }
         };
 
-        let host = prepared.request.host.clone();
-        let command = prepared.request.command.clone();
-        let decision = prepared.decision.clone();
-
-        // ── 2. 审批 ──
-        let approval = self
-            .approver
-            .ask(&ApprovalRequest {
-                host: host.clone(),
-                env: self.ctx.policy().env_of(&host),
-                command: command.clone(),
-                decision: decision.clone(),
-                host_count: 1,
-                // 极高危命令（spec §14.2）：确认之外还要手打主机名
-                require_typed_host: self.ctx.policy().is_critical(&command),
-            })
-            .await;
-
-        let (approved, label, note) = match approval {
-            Ok(ApprovalResult::Approved) => (true, decision.label().to_string(), None),
-            Ok(ApprovalResult::Rejected) => (
-                false,
-                "rejected".to_string(),
-                Some("用户拒绝了此操作。不要重试，也不要换一种写法达到同样效果。".to_string()),
-            ),
-            Ok(ApprovalResult::Timeout) => (
-                false,
-                "timeout".to_string(),
-                Some("审批超时，操作未执行。".to_string()),
-            ),
-            Err(AresError::Denied(reason)) => (
-                false,
-                "deny".to_string(),
-                Some(format!(
-                    "此操作被安全策略禁止：{reason}\n\
-                     不要尝试变形、拆分或用其他工具达到同样效果。\
-                     直接告诉用户这件事需要人工执行。"
-                )),
-            ),
-            Err(e) => (false, "error".to_string(), Some(format!("审批失败：{e}"))),
-        };
-
         // ── 3. 执行 ──
+        // 执行前快照（审计用：execute 会移动 request）
+        let audited_command = prepared.request.command.clone();
+        let audited_host = prepared.request.host.clone();
         let (display, content, success) = if approved {
             match exec_tool.execute(&self.ctx, prepared.request).await {
                 Ok(out) => (out.display.clone(), out.content, true),
@@ -443,16 +482,16 @@ impl AgentLoop {
         // 不能证明拦下过什么 —— 后者在事后复盘时同样重要
         let rec = AuditRecord::new(
             now_rfc3339(),
-            host.as_str(),
+            audited_host.as_str(),
             "terminal_execute",
-            &command,
+            &audited_command,
             None,
             &content,
             &label,
             self.ctx.caller(),
             self.ctx.session_id(),
         )
-        .with_policy_hit(match &decision {
+        .with_policy_hit(match &prepared.decision {
             Decision::Deny { reason } => reason.clone(),
             Decision::Confirm { rule, .. } => rule.clone(),
             Decision::Auto { rule } => rule.clone(),
@@ -467,7 +506,7 @@ impl AgentLoop {
         (
             ToolRun {
                 tool: "terminal_execute".into(),
-                command: Some(command),
+                command: Some(audited_command),
                 decision_label: label,
                 display,
                 success,
