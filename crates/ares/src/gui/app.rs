@@ -152,6 +152,10 @@ pub struct GuiApp {
     split_pending: Option<Split>,
     /// Agent 目标主机集合（多主机编排；chips 多选）。
     agent_targets: std::collections::BTreeSet<String>,
+    /// 对话历史弹窗 + 恢复（a4 对话持久化）。
+    history_modal: bool,
+    history_preview: Option<Vec<(String, String)>>,
+    restore_msgs: Option<Vec<(String, String)>>,
     agent: Option<AgentBridge>,
     rt: Arc<tokio::runtime::Runtime>,
     /// 供读线程触发的重画句柄（Session 构造时使用）。
@@ -172,6 +176,8 @@ struct AgentBridge {
     progress: Arc<std::sync::Mutex<Option<String>>>,
     cancel: Arc<std::sync::atomic::AtomicBool>,
     progress_text: Option<String>,
+    /// 已写入存档的消息条数（JSONL 增量追加）。
+    saved_count: usize,
 }
 
 enum AgentEvent {
@@ -204,6 +210,9 @@ impl GuiApp {
             agent_open: false,
             split_pending: None,
             agent_targets: std::collections::BTreeSet::new(),
+            history_modal: false,
+            history_preview: None,
+            restore_msgs: None,
             agent: None,
             rt,
             egui_ctx: None,
@@ -473,7 +482,17 @@ impl GuiApp {
                 .block_on(crate::build_agent(scope, executor, Arc::new(approver)))
             {
                 Ok(agent) => {
-                    self.agent = Some(AgentBridge::new(agent));
+                    let mut bridge = AgentBridge::new(agent);
+                    if let Some(msgs) = self.restore_msgs.take() {
+                        // 恢复历史：注入 LLM 上下文 + 面板显示
+                        {
+                            let mut a = bridge.agent.try_lock().expect("刚构建无人持锁");
+                            a.restore_history(&msgs);
+                        }
+                        bridge.messages = msgs;
+                        bridge.saved_count = bridge.messages.len();
+                    }
+                    self.agent = Some(bridge);
                 }
                 Err(e) => {
                     eprintln!("Agent 面板启动失败：{e}");
@@ -506,7 +525,66 @@ impl AgentBridge {
             progress,
             cancel,
             progress_text: None,
+            saved_count: 0,
         }
+    }
+
+    /// 追加保存对话到 `{data_dir}/sessions/<host>.jsonl`（增量 JSONL）。
+    fn save_session(&mut self) {
+        let host = self
+            .messages
+            .first()
+            .map(|(_, _)| "agent")
+            .unwrap_or("agent");
+        // 用 messages 里第一条 user 前的 system 不含主机信息 —— 用文件名 agent.jsonl 即可
+        let _ = host;
+        let dir = ares_core::paths::data_dir().join("sessions");
+        if std::fs::create_dir_all(&dir).is_err() {
+            return;
+        }
+        let path = dir.join("agent.jsonl");
+        let mut out = String::new();
+        for (role, text) in &self.messages[self.saved_count..] {
+            if role == "system" {
+                continue;
+            }
+            if let Ok(line) = serde_json::to_string(&serde_json::json!({
+                "role": role,
+                "text": text,
+            })) {
+                out.push_str(&line);
+                out.push('\n');
+            }
+        }
+        if !out.is_empty() {
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+            {
+                let _ = f.write_all(out.as_bytes());
+                self.saved_count = self.messages.len();
+            }
+        }
+    }
+
+    /// 读取全部存档消息（历史恢复用）。
+    fn load_session() -> Vec<(String, String)> {
+        let path = ares_core::paths::data_dir()
+            .join("sessions")
+            .join("agent.jsonl");
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            return Vec::new();
+        };
+        text.lines()
+            .filter_map(|l| {
+                let v: serde_json::Value = serde_json::from_str(l).ok()?;
+                let role = v["role"].as_str()?.to_string();
+                let text = v["text"].as_str()?.to_string();
+                Some((role, text))
+            })
+            .collect()
     }
 
     /// 停止当前任务。
@@ -522,6 +600,7 @@ impl AgentBridge {
         let text = self.input.trim().to_string();
         self.input.clear();
         self.messages.push(("user".into(), text.clone()));
+        self.save_session();
         self.busy = true;
         self.cancel
             .store(false, std::sync::atomic::Ordering::Relaxed);
@@ -573,6 +652,7 @@ impl AgentBridge {
                         .push(("assistant".into(), format!("错误：{e}")));
                 }
             }
+            self.save_session();
             self.busy = false;
         }
     }
@@ -853,6 +933,21 @@ impl eframe::App for GuiApp {
                         if changed {
                             self.agent = None;
                             self.agent_open = false;
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        if ui.small_button("历史").clicked() {
+                            self.history_preview = Some(AgentBridge::load_session());
+                            self.history_modal = true;
+                        }
+                        if ui.small_button("清空").clicked() {
+                            self.agent = None;
+                            self.agent_open = false;
+                            let _ = std::fs::remove_file(
+                                ares_core::paths::data_dir()
+                                    .join("sessions")
+                                    .join("agent.jsonl"),
+                            );
                         }
                     });
                     ui.separator();
@@ -1415,6 +1510,64 @@ impl eframe::App for GuiApp {
             }
             if close {
                 self.settings_modal = false;
+            }
+        }
+
+        // ── 对话历史弹窗 ──
+        if self.history_modal {
+            let mut close = false;
+            let mut restore = false;
+            let mut clear_preview = false;
+            egui::Window::new("对话历史")
+                .collapsible(false)
+                .default_size([440.0, 420.0])
+                .show(ctx, |ui| {
+                    if let Some(msgs) = &self.history_preview {
+                        if msgs.is_empty() {
+                            ui.label(RichText::new("暂无历史记录").color(Color32::GRAY));
+                        }
+                        egui::ScrollArea::vertical()
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                for (role, text) in msgs {
+                                    let color = match role.as_str() {
+                                        "user" => Color32::from_rgb(107, 179, 74),
+                                        _ => Color32::from_rgb(220, 220, 220),
+                                    };
+                                    ui.label(
+                                        RichText::new(format!("[{role}] {text}")).color(color),
+                                    );
+                                }
+                            });
+                        ui.separator();
+                        ui.horizontal(|ui| {
+                            if ui.button("恢复此会话").clicked() {
+                                restore = true;
+                            }
+                            if ui.button("关闭").clicked() {
+                                close = true;
+                            }
+                        });
+                    } else {
+                        ui.label(RichText::new("加载中…").color(Color32::GRAY));
+                    }
+                });
+            if restore {
+                if let Some(msgs) = self.history_preview.clone() {
+                    self.restore_msgs = Some(msgs);
+                }
+                // 重建 agent（应用恢复）
+                self.agent = None;
+                self.agent_open = false;
+                self.toggle_agent_simple();
+                clear_preview = true;
+                close = true;
+            }
+            if clear_preview {
+                self.history_preview = None;
+            }
+            if close {
+                self.history_modal = false;
             }
         }
 

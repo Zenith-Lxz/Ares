@@ -469,6 +469,16 @@ impl AgentLoop {
     pub fn history_len(&self) -> usize {
         self.history.len()
     }
+
+    /// 恢复历史消息（对话持久化：从存档载入的 user/assistant 消息）。
+    pub fn restore_history(&mut self, msgs: &[(String, String)]) {
+        for (role, text) in msgs {
+            match role.as_str() {
+                "user" => self.history.push(Message::user(text.clone())),
+                _ => self.history.push(Message::assistant(text.clone(), vec![])),
+            }
+        }
+    }
 }
 
 #[cfg(test)]

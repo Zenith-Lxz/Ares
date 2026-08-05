@@ -312,6 +312,7 @@ dependencies = [
  "rpassword",
  "russh",
  "russh-sftp",
+ "serde_json",
  "tempfile",
  "tokio",
  "tracing",
