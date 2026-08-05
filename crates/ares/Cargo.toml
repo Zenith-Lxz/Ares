@@ -1,0 +1,15 @@
+[package]
+name = "ares"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "ares"
+path = "src/main.rs"
+
+[dependencies]
+ares-core.workspace = true
+anyhow.workspace = true
+tokio.workspace = true

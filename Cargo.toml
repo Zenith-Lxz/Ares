@@ -1,0 +1,37 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/ares-core",
+    "crates/ares-darwin",
+    "crates/ares",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+license = "MIT"
+# crate 名 `ares` / `ares-core` 在 crates.io 上已被占用（他人项目），
+# 本 workspace 的 crate 只内部使用，不发布 crates.io。
+# 如将来要发布，改名为 ares-rs / ares-core-rs 等未被占用的名称。
+publish = false
+
+[workspace.dependencies]
+# 内部 crate
+ares-core = { path = "crates/ares-core" }
+ares-darwin = { path = "crates/ares-darwin" }
+
+# 外部依赖统一在此声明版本，各 crate 用 workspace = true 引用
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

@@ -1,0 +1,11 @@
+[package]
+name = "ares-darwin"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+security-framework = "=3.4"   # 精确锁版本 —— 本任务代码基于 3.4 API 核实（passwords 模块）

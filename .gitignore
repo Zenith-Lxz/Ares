@@ -1,0 +1,35 @@
+# ── Agent 工作目录（永不提交）─────────────────────────────
+# .hermes/ 可能包含私有会话导出与审查中间产物
+.hermes/
+# skills CLI 生成的 agent skill 目录（mattpocock/skills 等）
+.agents/
+.claude/
+.agents/
+
+# ── 构建产物 ────────────────────────────────────────────────
+/target
+**/target/
+
+# ── macOS ──────────────────────────────────────────────────
+.DS_Store
+**/*.rs.bk
+
+# ── 本地签名产物，不入库 ───────────────────────────────────
+/build
+*.p12
+
+# ── 文档工作副本（外部工具的冲突副本，勿入库）───────────────
+docs/superpowers/plans/* 2.md
+docs/superpowers/plans/* 3.md
+docs/superpowers/plans/* 4.md
+docs/superpowers/plans/* 5.md
+
+# ── 个人备忘 ───────────────────────────────────────────────
+IDEA.md
+
+# ── skills CLI 锁文件 ──────────────────────────────────────
+skills-lock.json
+
+# ── 设计文档（不上公开仓库，仅本地）──────────────
+docs/
+README.md

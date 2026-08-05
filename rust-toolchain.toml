@@ -1,0 +1,4 @@
+[toolchain]
+channel = "1.97.1"       # 写死具体版本，勿用 stable —— 保证任何人 clone 后拿到同一版本
+components = ["rustfmt", "clippy"]
+targets = ["aarch64-apple-darwin"]
