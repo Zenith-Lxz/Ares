@@ -95,32 +95,6 @@ fn diff_since(baseline: &str, final_text: &str) -> String {
 }
 
 /// 空会话保护：不 panic 的稳定判定。
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn diff_returns_only_new_content() {
-        let base = "line1\nline2\n$ ";
-        let final_ = "line1\nline2\n$ df -P\nFilesystem\n/dev/disk1\n$ ";
-        assert_eq!(
-            diff_since(base, final_),
-            "$ df -P\nFilesystem\n/dev/disk1\n$ "
-        );
-    }
-
-    #[test]
-    fn diff_with_identical_content_is_empty() {
-        let text = "same\ncontent";
-        assert_eq!(diff_since(text, text), "");
-    }
-
-    #[test]
-    fn diff_handles_short_baseline() {
-        assert_eq!(diff_since("", "new\noutput"), "new\noutput");
-    }
-}
-
 /// 多主机路由执行器（2026-08-05 多主机编排）：
 /// 当前 pane 主机 → 终端注入（用户看得见）；其他主机 → SshExecutor 独立通道。
 pub struct RoutedExecutor {
@@ -151,5 +125,31 @@ impl Executor for RoutedExecutor {
 
     fn supports(&self, _host: &HostId) -> bool {
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn diff_returns_only_new_content() {
+        let base = "line1\nline2\n$ ";
+        let final_ = "line1\nline2\n$ df -P\nFilesystem\n/dev/disk1\n$ ";
+        assert_eq!(
+            diff_since(base, final_),
+            "$ df -P\nFilesystem\n/dev/disk1\n$ "
+        );
+    }
+
+    #[test]
+    fn diff_with_identical_content_is_empty() {
+        let text = "same\ncontent";
+        assert_eq!(diff_since(text, text), "");
+    }
+
+    #[test]
+    fn diff_handles_short_baseline() {
+        assert_eq!(diff_since("", "new\noutput"), "new\noutput");
     }
 }

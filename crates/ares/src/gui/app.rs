@@ -839,7 +839,7 @@ impl eframe::App for GuiApp {
                             }
                         }
                         for host in candidates {
-                            let mut sel = self.agent_targets.contains(&host);
+                            let sel = self.agent_targets.contains(&host);
                             if ui.selectable_label(sel, &host).clicked() {
                                 changed = true;
                                 if sel {
