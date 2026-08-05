@@ -33,7 +33,10 @@ impl Executor for TerminalSessionExecutor {
         let baseline = self.session.snapshot_text();
 
         // 注入命令：像人打字 + 回车
-        self.session.write(req.command.as_bytes());
+        // （清洗尾部换行 —— LLM 生成的命令可能带 \n，若原样注入
+        //   \n 执行命令 + \r 触发空命令 → 终端多一个提示符）
+        let cmd = req.command.trim_end_matches(['\r', '\n']);
+        self.session.write(cmd.as_bytes());
         self.session.write(b"\r");
 
         // 等待「变化出现 → 稳定」或超时。

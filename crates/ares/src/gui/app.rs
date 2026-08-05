@@ -367,7 +367,17 @@ impl GuiApp {
                         }
                     }
                 }
-                egui::Event::Key { key, modifiers, .. } => {
+                egui::Event::Key {
+                    key,
+                    pressed,
+                    modifiers,
+                    ..
+                } => {
+                    // 只处理按下事件；release（pressed=false）会导致
+                    // Enter/方向键/退格被转发两次（2026-08-05 双提示符根因）
+                    if !pressed {
+                        continue;
+                    }
                     let ctrl = modifiers.ctrl;
                     // 全局快捷键
                     if ctrl {
