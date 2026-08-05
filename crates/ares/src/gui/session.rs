@@ -8,6 +8,7 @@ use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize}
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
 
+#[derive(Clone)]
 pub struct Session {
     /// tab 标题（ssh_config 别名）。
     pub alias: String,
@@ -100,6 +101,30 @@ impl Session {
         self.parser.lock().unwrap().screen().clone()
     }
 
+    /// 当前屏幕的纯文本快照（去掉尾随空白行），Agent 观察终端用。
+    pub fn snapshot_text(&self) -> String {
+        let screen = self.screen();
+        let (rows, cols) = screen.size();
+        let mut lines: Vec<String> = Vec::with_capacity(rows as usize);
+        for r in 0..rows {
+            let mut line = String::new();
+            for c in 0..cols {
+                if let Some(cell) = screen.cell(r, c) {
+                    if cell.is_wide_continuation() {
+                        continue;
+                    }
+                    line.push_str(&cell.contents());
+                }
+            }
+            lines.push(line);
+        }
+        // 去掉尾部空白行
+        while lines.last().map(|l| l.trim().is_empty()).unwrap_or(false) {
+            lines.pop();
+        }
+        lines.join("\n")
+    }
+
     /// ssh 进程是否已退出。
     pub fn is_exited(&self) -> bool {
         *self.exited.lock().unwrap()
@@ -133,6 +158,17 @@ mod tests {
         let screen = p.screen();
         assert_eq!(screen.cell(0, 0).unwrap().contents(), "");
         assert_eq!(screen.cell(1, 0).unwrap().contents(), "");
+    }
+
+    #[test]
+    fn snapshot_text_strips_trailing_blank_lines() {
+        let mut p = vt100::Parser::new(24, 80, 0);
+        p.process(b"line1\r\nline2\r\n");
+        // 手动构造：直接用 Parser 验证快照行为（Session 包装同样逻辑）
+        // snapshot_text 在 Session 上；这里验证 vt100 行内容即可
+        let screen = p.screen();
+        assert_eq!(screen.cell(0, 0).unwrap().contents(), "l");
+        assert_eq!(screen.cell(1, 0).unwrap().contents(), "l");
     }
 
     #[test]

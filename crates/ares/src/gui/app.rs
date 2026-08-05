@@ -3,10 +3,13 @@
 //! 布局：顶部 Tab 栏（多 ssh 会话）· 中央终端渲染区 · 右侧可折叠
 //! Agent 面板（Ctrl-a a）· 底部状态栏。主机选择弹窗读 `~/.ssh/config`。
 
+use crate::gui::approver::{GuiApprover, PendingApproval};
+use crate::gui::exec::TerminalSessionExecutor;
 use crate::gui::session::Session;
 use crate::gui::term;
-use ares_agent::{AgentLoop, TurnResult};
+use ares_agent::{AgentLoop, ApprovalResult, TurnResult};
 use ares_core::ssh_config::{self, SshHost};
+use ares_core::Decision;
 use egui::{Color32, FontFamily, FontId, RichText};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
@@ -25,6 +28,9 @@ pub struct GuiApp {
     agent_open: bool,
     agent: Option<AgentBridge>,
     rt: Arc<tokio::runtime::Runtime>,
+    /// GUI 审批通道：agent 线程 → GUI 主线程
+    approve_rx: std::sync::mpsc::Receiver<PendingApproval>,
+    pending_approval: Option<PendingApproval>,
 }
 
 struct AgentBridge {
@@ -54,6 +60,8 @@ impl GuiApp {
             agent_open: false,
             agent: None,
             rt,
+            approve_rx: std::sync::mpsc::channel().1,
+            pending_approval: None,
         }
     }
 
@@ -82,11 +90,6 @@ impl GuiApp {
             self.agent = None;
             self.picking = true;
         }
-    }
-
-    fn build_agent_sync(&self, host: &str) -> anyhow::Result<AgentLoop> {
-        self.rt
-            .block_on(crate::build_agent(vec![ares_core::HostId::new(host)]))
     }
 
     /// 转发输入事件到当前会话（拦截全局快捷键）。
@@ -140,7 +143,17 @@ impl GuiApp {
         self.agent_open = !self.agent_open;
         if self.agent_open && self.agent.is_none() {
             let host = self.tabs[self.active].alias.clone();
-            match self.build_agent_sync(&host) {
+            // 终端注入执行器：agent 的命令直接写进当前终端会话
+            // （Session 内部状态全 Arc 共享，clone 后注入的是同一个会话）
+            let executor = Arc::new(TerminalSessionExecutor::new(self.tabs[self.active].clone()));
+            // GUI 审批通道
+            let (approver, rx) = GuiApprover::pair();
+            self.approve_rx = rx;
+            match self.rt.block_on(crate::build_agent(
+                vec![ares_core::HostId::new(host.clone())],
+                executor,
+                Arc::new(approver),
+            )) {
                 Ok(agent) => {
                     self.agent = Some(AgentBridge::new(agent));
                 }
@@ -226,6 +239,49 @@ impl eframe::App for GuiApp {
         // Agent 面板任务轮询
         if let Some(a) = &mut self.agent {
             a.poll();
+        }
+
+        // 审批轮询：agent 线程发来的确认请求 → 弹窗
+        while let Ok(p) = self.approve_rx.try_recv() {
+            self.pending_approval = Some(p);
+        }
+        if let Some(p) = &self.pending_approval {
+            let mut approve = false;
+            let mut reject = false;
+            egui::Window::new("操作确认")
+                .collapsible(false)
+                .resizable(false)
+                .default_size([480.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.label(
+                        RichText::new(format!("主机：{}", p.req.host))
+                            .color(Color32::from_rgb(179, 146, 74)),
+                    );
+                    if let Decision::Confirm { rule, critical } = &p.req.decision {
+                        let tag = if *critical {
+                            "  ☢ 极高危（需输入主机名）"
+                        } else {
+                            ""
+                        };
+                        ui.label(format!("规则：{rule}{tag}"));
+                    } else {
+                        ui.label(format!("判定：{}", decision_label(&p.req.decision)));
+                    }
+                    ui.add_space(4.0);
+                    ui.monospace(ares_core::display::sanitize(&p.req.command));
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        approve = ui.button(RichText::new("批准执行").strong()).clicked();
+                        reject = ui.button("拒绝").clicked();
+                    });
+                });
+            if approve {
+                let _ = p.respond.send(ApprovalResult::Approved);
+                self.pending_approval = None;
+            } else if reject {
+                let _ = p.respond.send(ApprovalResult::Rejected);
+                self.pending_approval = None;
+            }
         }
 
         // ── 顶部：Tab 栏 ──
@@ -579,4 +635,15 @@ fn install_fonts(ctx: &egui::Context) {
         }
     }
     ctx.set_fonts(fonts);
+}
+
+/// Decision 的简短标签（确认弹窗展示用）。
+fn decision_label(d: &Decision) -> &'static str {
+    match d {
+        Decision::Deny { .. } => "deny（已禁止）",
+        Decision::Confirm { critical: true, .. } => "confirm（极高危）",
+        Decision::Confirm { .. } => "confirm",
+        Decision::Observer => "observer（只读）",
+        Decision::Auto { .. } => "auto（自动）",
+    }
 }

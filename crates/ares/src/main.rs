@@ -3,11 +3,11 @@ mod gui;
 mod repl;
 
 use anyhow::{Context, Result};
-use ares_agent::{AgentLoop, CliApprover};
+use ares_agent::{AgentLoop, Approver, CliApprover};
 use ares_audit::AuditWriter;
 use ares_core::config::HostsConfig;
 use ares_core::{paths, AresError, HostId};
-use ares_exec::{Executor, LocalExecutor, SshExecutor};
+use ares_exec::{Executor, LocalExecutor};
 use ares_llm::{AnthropicProvider, OpenAiProvider, Provider, ProviderKind, ProvidersConfig};
 use ares_policy::{PolicyConfig, PolicyEngine};
 use ares_tools::{default_registry, ToolContext};
@@ -170,16 +170,26 @@ fn cmd_provider(action: ProviderAction) -> Result<()> {
 /// `ares chat`：本机纯对话（M1 的原始 REPL 入口）。
 async fn cmd_chat() -> Result<()> {
     paths::ensure_dirs()?;
-    let agent = build_agent(vec![HostId::localhost()]).await?;
+    let agent = build_agent(
+        vec![HostId::localhost()],
+        Arc::new(LocalExecutor::new()),
+        Arc::new(CliApprover::new()),
+    )
+    .await?;
     repl::run(agent).await?;
     Ok(())
 }
 
 /// 公共构建：策略引擎 / provider / 审计 / 上下文。
 ///
-/// executor 按 scope 选择：scope 全部为本机 → LocalExecutor；
-/// 含远端主机 → SshExecutor（M1.5 最小实现，M2 完善密钥/askpass）。
-pub(crate) async fn build_agent(scope: Vec<HostId>) -> Result<AgentLoop> {
+/// executor 由调用方决定：CLI 用 LocalExecutor；GUI 用
+/// TerminalSessionExecutor（agent 的命令注入当前终端会话）。
+/// approver 同理：CLI 用 CliApprover（终端 y/n），GUI 用确认弹窗。
+pub(crate) async fn build_agent(
+    scope: Vec<HostId>,
+    executor: Arc<dyn Executor>,
+    approver: Arc<dyn Approver>,
+) -> Result<AgentLoop> {
     let hosts_cfg = HostsConfig::load()?;
     let policy_cfg = PolicyConfig::load()?;
     let policy = Arc::new(PolicyEngine::new(policy_cfg, hosts_cfg)?);
@@ -202,19 +212,13 @@ pub(crate) async fn build_agent(scope: Vec<HostId>) -> Result<AgentLoop> {
     let audit = Arc::new(Mutex::new(AuditWriter::open()?));
     let session_id = format!("sess-{}", ares_audit::now_rfc3339());
 
-    let executor: Arc<dyn Executor> = if scope.iter().all(|h| h.is_local()) {
-        Arc::new(LocalExecutor::new())
-    } else {
-        Arc::new(SshExecutor::new())
-    };
-
     let ctx = ToolContext::new(executor, policy, audit, scope, session_id, "agent");
 
     Ok(AgentLoop::new(
         provider,
         default_registry(),
         ctx,
-        Arc::new(CliApprover::new()),
+        approver,
         &entry.model,
     )?)
 }
