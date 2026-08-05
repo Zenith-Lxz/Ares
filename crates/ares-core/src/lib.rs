@@ -2,7 +2,11 @@
 //!
 //! 本 crate 不依赖任何其他 ares crate，是依赖图的根。
 
+pub mod config;
+pub mod display;
 pub mod error;
+pub mod paths;
+pub mod redact;
 pub mod types;
 
 pub use error::{AresError, Result};
