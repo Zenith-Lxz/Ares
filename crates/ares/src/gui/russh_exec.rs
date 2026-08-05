@@ -15,7 +15,7 @@ use russh::client;
 use russh::keys::PrivateKeyWithHashAlg;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 /// 认证私钥候选（与 SFTP 一致）。
 const KEY_NAMES: [&str; 3] = ["id_ed25519", "id_rsa", "id_ecdsa"];
