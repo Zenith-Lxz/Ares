@@ -6,7 +6,7 @@
 use crate::gui::approver::{GuiApprover, PendingApproval};
 use crate::gui::exec::TerminalSessionExecutor;
 use crate::gui::session::{ConnTarget, Session};
-use crate::gui::term;
+use crate::gui::term::{self, TermCache};
 use ares_agent::{AgentLoop, ApprovalResult, TurnResult};
 use ares_core::config::{HostEntry, HostsConfig};
 use ares_core::ssh_config::{self, SshHost};
@@ -50,6 +50,10 @@ pub struct GuiApp {
     /// GUI 审批通道：agent 线程 → GUI 主线程
     approve_rx: std::sync::mpsc::Receiver<PendingApproval>,
     pending_approval: Option<PendingApproval>,
+    /// 终端渲染缓存（行签名，静止时零绘制）
+    term_cache: TermCache,
+    /// 各 tab 上次渲染时的数据版本（决定是否重画）
+    tab_versions: Vec<u64>,
 }
 
 struct AgentBridge {
@@ -89,6 +93,8 @@ impl GuiApp {
             rt,
             approve_rx: std::sync::mpsc::channel().1,
             pending_approval: None,
+            term_cache: TermCache::default(),
+            tab_versions: Vec::new(),
         }
     }
 
@@ -289,6 +295,10 @@ impl AgentBridge {
 
 impl eframe::App for GuiApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // 数据驱动重画：终端静止时 egui 不重画（省 CPU）；
+        // 轮询保证新数据最多 33ms 延迟显示
+        ctx.request_repaint_after(std::time::Duration::from_millis(33));
+
         // 处理输入（转发 / 快捷键）
         self.handle_input(ctx);
 
@@ -431,10 +441,13 @@ impl eframe::App for GuiApp {
                     ui.separator();
 
                     if let Some(a) = &mut self.agent {
-                        // 消息区
+                        // 消息区：限制高度，给底部输入区留空间（否则被挤出面板）
+                        let input_h = 60.0;
+                        let avail_h = ui.available_height().max(input_h + 20.0);
                         egui::ScrollArea::vertical()
                             .auto_shrink([false, false])
                             .stick_to_bottom(true)
+                            .max_height(avail_h - input_h)
                             .show(ui, |ui| {
                                 for (role, text) in &a.messages {
                                     let color = match role.as_str() {
@@ -487,10 +500,23 @@ impl eframe::App for GuiApp {
                 if self.last_size != Some((rows, cols)) {
                     s.resize(rows, cols);
                     self.last_size = Some((rows, cols));
+                    // 尺寸变化后整屏缓存失效
+                    self.term_cache = TermCache::default();
                 }
-                let screen = s.screen();
-                term::draw_terminal(ui, &screen, MONO);
-                ui.allocate_space(ui.available_size());
+                // 数据版本未变且非首次 → 跳过重画（保留上次画面）
+                let v = s.version();
+                let cached = self.tab_versions.get(self.active).copied();
+                if cached != Some(v) {
+                    let screen = s.screen();
+                    term::draw_terminal(ui, &screen, MONO, &mut self.term_cache);
+                    if self.tab_versions.len() <= self.active {
+                        self.tab_versions.resize(self.active + 1, 0);
+                    }
+                    self.tab_versions[self.active] = v;
+                } else {
+                    // 无新数据：占用空间保持布局稳定
+                    let _ = ui.allocate_rect(ui.available_rect_before_wrap(), egui::Sense::hover());
+                }
             } else {
                 ui.centered_and_justified(|ui| {
                     ui.label(RichText::new("按 + 或 Ctrl-T 选择主机连接").color(Color32::GRAY));

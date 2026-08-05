@@ -5,6 +5,7 @@
 
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use std::io::{Read, Write};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// ssh 连接目标（来自 ARES 主机簿，独立于 ssh_config）。
@@ -26,6 +27,15 @@ pub struct Session {
     _child: Arc<Mutex<Box<dyn Child + Send + Sync>>>,
     /// pty 已关闭（ssh 退出）。
     pub exited: Arc<Mutex<bool>>,
+    /// 屏幕数据版本号：读线程每次 process 后 +1，GUI 据此决定是否重画。
+    version: Arc<AtomicU64>,
+}
+
+impl Session {
+    /// 当前数据版本（读线程更新；无变化时 GUI 可用缓存渲染）。
+    pub fn version(&self) -> u64 {
+        self.version.load(Ordering::Relaxed)
+    }
 }
 
 impl Session {
@@ -67,11 +77,13 @@ impl Session {
 
         let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 0)));
         let exited = Arc::new(Mutex::new(false));
+        let version = Arc::new(AtomicU64::new(0));
 
-        // 读线程：pty 输出 → vt100 解析
+        // 读线程：pty 输出 → vt100 解析（每批数据后 bump 版本号）
         {
             let parser = Arc::clone(&parser);
             let exited = Arc::clone(&exited);
+            let version = Arc::clone(&version);
             std::thread::spawn(move || {
                 let mut buf = [0u8; 8192];
                 loop {
@@ -81,15 +93,18 @@ impl Session {
                             if let Ok(mut p) = parser.lock() {
                                 p.process(&buf[..n]);
                             }
+                            version.fetch_add(1, Ordering::Relaxed);
                         }
                     }
                 }
                 *exited.lock().unwrap() = true;
+                version.fetch_add(1, Ordering::Relaxed);
             });
         }
 
         Ok(Self {
             alias: alias.to_string(),
+            version,
             parser,
             writer: Arc::new(Mutex::new(writer)),
             master: Arc::new(Mutex::new(pair.master)),
