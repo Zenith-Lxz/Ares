@@ -235,4 +235,29 @@ mod tests {
         assert_eq!(color_256(232), Color32::from_rgb(8, 8, 8));
         assert_eq!(color_256(255), Color32::from_rgb(238, 238, 238));
     }
+
+    #[test]
+    fn row_signature_differs_on_content_and_color() {
+        let mut p = vt100::Parser::new(3, 40, 0);
+        p.process(b"plain text");
+        let s1 = p.screen();
+        let sig_a = row_signature(s1, 0, 40);
+        let _ = &s1;
+        // 改颜色（同文本）
+        p.process(b"\x1b[H\x1b[31mplain text");
+        let sig_b = row_signature(p.screen(), 0, 40);
+        assert_ne!(sig_a, sig_b, "颜色变化必须改变签名");
+        // 清空重写不同文本
+        p.process(b"\x1b[2J\x1b[Hother text");
+        let sig_c = row_signature(p.screen(), 0, 40);
+        assert_ne!(sig_a, sig_c, "内容变化必须改变签名");
+        // 相同内容签名稳定
+        let mut p2 = vt100::Parser::new(3, 40, 0);
+        p2.process(b"plain text");
+        assert_eq!(
+            sig_a,
+            row_signature(p2.screen(), 0, 40),
+            "相同内容签名应一致"
+        );
+    }
 }
