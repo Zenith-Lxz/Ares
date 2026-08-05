@@ -185,6 +185,11 @@ pub struct GuiApp {
     /// 主题导入路径输入（.itermcolors）
     theme_import: String,
     theme_msg: Option<String>,
+    /// 持久化设置（批次8b）
+    settings: crate::gui::settings::GuiSettings,
+    /// 背景图纹理（已加载的路径）
+    bg_texture: Option<egui::TextureHandle>,
+    bg_loaded: Option<String>,
 }
 
 struct AgentBridge {
@@ -219,7 +224,14 @@ impl GuiApp {
         // MCP：连接配置的 server 并注册其工具（失败记录，不阻塞启动）
         let mcp = McpManager::load_and_connect(&rt);
         let mcp_errors = mcp.errors.clone();
+        let settings = crate::gui::settings::GuiSettings::load();
+        let theme = crate::gui::themes::load_theme(&settings.theme_name);
+        let theme_name = settings.theme_name.clone();
+        let font_size = settings.font_size;
         Self {
+            theme,
+            theme_name,
+            font_size,
             hosts,
             ssh_imports,
             tabs: Vec::new(),
@@ -253,14 +265,11 @@ impl GuiApp {
             plan_rx: std::sync::mpsc::channel().1,
             plan_items: Vec::new(),
             md_cache: egui_commonmark::CommonMarkCache::default(),
-            theme: crate::gui::themes::builtin_themes()
-                .into_iter()
-                .next()
-                .unwrap(),
-            theme_name: "Default".into(),
-            font_size: 14.0,
+            settings: crate::gui::settings::GuiSettings::load(),
             theme_import: String::new(),
             theme_msg: None,
+            bg_texture: None,
+            bg_loaded: None,
         }
     }
 
@@ -910,47 +919,64 @@ impl eframe::App for GuiApp {
             }
         }
 
-        // ── 顶部：Tab 栏 ──
-        egui::TopBottomPanel::top("tabs").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                let mut to_close: Option<usize> = None;
-                let mut to_activate: Option<usize> = None;
-                for (i, t) in self.tabs.iter().enumerate() {
-                    let selected = i == self.active;
-                    let exited = matches!(t, Tab::Term(w) if w.is_exited());
-                    let label = if exited {
-                        format!("✗ {}", t.title())
-                    } else {
-                        t.title().to_string()
-                    };
-                    let btn = ui.selectable_label(selected, label);
-                    if btn.clicked() {
-                        to_activate = Some(i);
+        // ── 顶部：Tab 栏（可隐藏：iTerm2 极简模式；Ctrl-T/W 仍可用）──
+        if self.settings.hide_tabs {
+            // 隐藏时只保留一个极小的「+」入口，避免无法新增 tab
+            egui::TopBottomPanel::top("tabs_hidden").show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    if ui.button("+").clicked() {
+                        self.picking = true;
                     }
-                    // 关闭按钮（选中 tab 显示 ×）
-                    if selected && ui.small_button("×").clicked() {
-                        to_close = Some(i);
+                    if ui
+                        .selectable_label(self.agent_open, RichText::new("Agent").strong())
+                        .clicked()
+                    {
+                        self.toggle_agent_simple();
                     }
-                }
-                if ui.button("+").clicked() {
-                    self.picking = true;
-                }
-                if let Some(i) = to_activate {
-                    self.active = i;
-                }
-                if let Some(i) = to_close {
-                    self.active = i;
-                    self.close_active();
-                }
-                // Agent 面板开关
-                if ui
-                    .selectable_label(self.agent_open, RichText::new("Agent").strong())
-                    .clicked()
-                {
-                    self.toggle_agent_simple();
-                }
+                });
             });
-        });
+        } else {
+            egui::TopBottomPanel::top("tabs").show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    let mut to_close: Option<usize> = None;
+                    let mut to_activate: Option<usize> = None;
+                    for (i, t) in self.tabs.iter().enumerate() {
+                        let selected = i == self.active;
+                        let exited = matches!(t, Tab::Term(w) if w.is_exited());
+                        let label = if exited {
+                            format!("✗ {}", t.title())
+                        } else {
+                            t.title().to_string()
+                        };
+                        let btn = ui.selectable_label(selected, label);
+                        if btn.clicked() {
+                            to_activate = Some(i);
+                        }
+                        // 关闭按钮（选中 tab 显示 ×）
+                        if selected && ui.small_button("×").clicked() {
+                            to_close = Some(i);
+                        }
+                    }
+                    if ui.button("+").clicked() {
+                        self.picking = true;
+                    }
+                    if let Some(i) = to_activate {
+                        self.active = i;
+                    }
+                    if let Some(i) = to_close {
+                        self.active = i;
+                        self.close_active();
+                    }
+                    // Agent 面板开关
+                    if ui
+                        .selectable_label(self.agent_open, RichText::new("Agent").strong())
+                        .clicked()
+                    {
+                        self.toggle_agent_simple();
+                    }
+                });
+            });
+        }
 
         // ── 底部：状态栏 ──
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
@@ -1215,6 +1241,59 @@ impl eframe::App for GuiApp {
 
         // ── 中央：终端渲染 ──
         egui::CentralPanel::default().show(ctx, |ui| {
+            // 背景图（iTerm2 化）：加载 + 铺底（终端默认背景透明处透出）
+            let bg_path = self.settings.background_image.clone();
+            if !bg_path.is_empty() && self.bg_loaded.as_deref() != Some(bg_path.as_str()) {
+                match std::fs::read(&bg_path) {
+                    Ok(bytes) => {
+                        let img = image::load_from_memory(&bytes)
+                            .map_err(|e| format!("图片解析失败：{e}"))
+                            .map(|img| {
+                                let rgba = img.to_rgba8();
+                                let (w, h) = rgba.dimensions();
+                                egui::ColorImage::from_rgba_unmultiplied(
+                                    [w as usize, h as usize],
+                                    rgba.as_raw(),
+                                )
+                            });
+                        match img {
+                            Ok(color_image) => {
+                                let handle = ctx.load_texture(
+                                    "ares_bg",
+                                    color_image,
+                                    egui::TextureOptions::LINEAR,
+                                );
+                                self.bg_texture = Some(handle);
+                                self.bg_loaded = Some(bg_path.clone());
+                            }
+                            Err(e) => {
+                                self.theme_msg = Some(format!("背景图加载失败：{e}"));
+                                self.bg_loaded = Some(bg_path.clone());
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        self.theme_msg = Some(format!("背景图读取失败：{e}"));
+                        self.bg_loaded = Some(bg_path.clone());
+                    }
+                }
+            }
+            // 绘制背景图 + 半透明遮罩（终端默认 bg 的 cell 会透出）
+            let bg_rect = ui.available_rect_before_wrap();
+            if let Some(tex) = &self.bg_texture {
+                ui.painter().image(
+                    tex.id(),
+                    bg_rect,
+                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                    Color32::WHITE,
+                );
+                // 遮罩：保证文字可读性
+                ui.painter().rect_filled(
+                    bg_rect,
+                    0.0,
+                    Color32::from_rgba_unmultiplied(0, 0, 0, 140),
+                );
+            }
             match self.tabs.get_mut(self.active) {
                 Some(Tab::Term(ws)) => {
                     let n = ws.sessions.len();
@@ -1724,14 +1803,47 @@ impl eframe::App for GuiApp {
                             if sel != cur {
                                 self.theme_name = sel.clone();
                                 self.theme = crate::gui::themes::load_theme(&sel);
+                                self.settings.theme_name = sel;
+                                self.settings.save();
                             }
                             ui.end_row();
                             ui.label("字号");
-                            ui.add(
-                                egui::Slider::new(&mut self.font_size, 10.0..=24.0)
-                                    .text("pt")
-                                    .fixed_decimals(1),
-                            );
+                            if ui
+                                .add(
+                                    egui::Slider::new(&mut self.font_size, 10.0..=24.0)
+                                        .text("pt")
+                                        .fixed_decimals(1),
+                                )
+                                .changed()
+                            {
+                                self.settings.font_size = self.font_size;
+                                self.settings.save();
+                            }
+                            ui.end_row();
+                            ui.label("隐藏 Tab 栏");
+                            if ui
+                                .checkbox(&mut self.settings.hide_tabs, "极简模式")
+                                .changed()
+                            {
+                                self.settings.save();
+                            }
+                            ui.end_row();
+                            ui.label("隐藏红绿灯");
+                            if ui
+                                .checkbox(&mut self.settings.undecorated, "无边框（重启生效）")
+                                .changed()
+                            {
+                                self.settings.save();
+                            }
+                            ui.end_row();
+                            ui.label("背景图");
+                            ui.horizontal(|ui| {
+                                ui.text_edit_singleline(&mut self.settings.background_image);
+                                if ui.small_button("应用").clicked() {
+                                    self.bg_loaded = None; // 强制重载
+                                    self.settings.save();
+                                }
+                            });
                             ui.end_row();
                             ui.label("导入主题");
                             ui.horizontal(|ui| {

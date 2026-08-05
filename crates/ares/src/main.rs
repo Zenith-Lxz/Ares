@@ -54,11 +54,14 @@ fn main() -> Result<()> {
 /// GUI 入口：eframe 窗口（多 tab 终端 + Agent 面板）。
 fn run_gui() -> Result<()> {
     let rt = Arc::new(tokio::runtime::Runtime::new()?);
+    let settings = crate::gui::settings::GuiSettings::load();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1080.0, 700.0])
             .with_min_inner_size([640.0, 400.0])
-            .with_title("ARES — Autonomous Remote Engineering System"),
+            .with_title("ARES — Autonomous Remote Engineering System")
+            // iTerm2 化：隐藏红绿灯（设置里可关，重启生效）
+            .with_decorations(!settings.undecorated),
         ..Default::default()
     };
     eframe::run_native(

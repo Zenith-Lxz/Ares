@@ -6,6 +6,7 @@ pub mod exec;
 pub mod plan_approver;
 pub mod russh_exec;
 pub mod session;
+pub mod settings;
 pub mod sftp;
 pub mod term;
 pub mod themes;

@@ -40,6 +40,7 @@ serde.workspace = true
 egui_commonmark = "0.19.0"
 plist = "1.7.4"
 toml.workspace = true
+image = { version = "0.25.6", default-features = false, features = ["png", "jpeg"] }
 
 [dev-dependencies]
 tempfile = "3"
