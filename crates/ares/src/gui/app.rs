@@ -348,6 +348,18 @@ impl GuiApp {
         Color32::from_rgb(b.r() / 2 + 18, b.g() / 2 + 18, b.b() / 2 + 18)
     }
 
+    /// undecorated（隐藏红绿灯）模式：顶部空白区域拖动窗口。
+    fn window_drag_area(&self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        if !self.settings.undecorated {
+            return;
+        }
+        let rect = ui.available_rect_before_wrap();
+        let resp = ui.interact(rect, ui.id().with("ares_window_drag"), egui::Sense::drag());
+        if resp.drag_started() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+        }
+    }
+
     /// 当前生效主题：优先当前 tab 主机的主题（主题随主机切换），否则全局。
     fn current_theme(&self) -> crate::gui::themes::Theme {
         if let Some(Tab::Term(ws)) = self.tabs.get(self.active) {
@@ -1065,6 +1077,7 @@ impl eframe::App for GuiApp {
                             self.toggle_agent_simple();
                         }
                     });
+                    self.window_drag_area(ui, ctx);
                 });
         }
 
@@ -1551,8 +1564,54 @@ impl eframe::App for GuiApp {
                     sftp_ui(&rt, ui, p);
                 }
                 None => {
+                    // 空状态引导（首次使用：新会话 / 添加主机 / 导入 ssh_config）
                     ui.centered_and_justified(|ui| {
-                        ui.label(RichText::new("按 + 或 Ctrl-T 选择主机连接").color(Color32::GRAY));
+                        ui.vertical(|ui| {
+                            ui.label(
+                                RichText::new("欢迎使用 ARES")
+                                    .size(22.0)
+                                    .strong()
+                                    .color(self.current_theme().fg),
+                            );
+                            ui.add_space(8.0);
+                            ui.label(
+                                RichText::new("极简 iTerm2 式 AI 运维终端 · 纯 Rust")
+                                    .color(Color32::GRAY),
+                            );
+                            ui.add_space(16.0);
+                            let mut act: Option<&str> = None;
+                            ui.horizontal(|ui| {
+                                if ui.button("🖥 新会话").clicked() {
+                                    act = Some("new");
+                                }
+                                if ui.button("➕ 添加主机").clicked() {
+                                    act = Some("add");
+                                }
+                                if ui.button("📥 从 ssh_config 导入").clicked() {
+                                    act = Some("import");
+                                }
+                            });
+                            ui.add_space(8.0);
+                            ui.label(
+                                RichText::new(
+                                    "快捷键：Ctrl-T 新会话 · Ctrl-a a Agent · Ctrl+Shift+D/E 分屏",
+                                )
+                                .small()
+                                .color(Color32::GRAY),
+                            );
+                            match act {
+                                Some("new") => {
+                                    self.picking = true;
+                                }
+                                Some("add") => {
+                                    self.add_modal = true;
+                                }
+                                Some("import") => {
+                                    self.import_modal = true;
+                                }
+                                _ => {}
+                            }
+                        });
                     });
                 }
             }
