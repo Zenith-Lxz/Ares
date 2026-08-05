@@ -44,6 +44,9 @@ pub struct HostEntry {
     /// key | password
     #[serde(default)]
     pub auth: String,
+    /// 该主机使用的主题名（空 = 跟随全局设置；主题随主机切换）
+    #[serde(default)]
+    pub theme: String,
     /// 形如 "02:00-05:00"
     #[serde(default)]
     pub maintenance_window: String,

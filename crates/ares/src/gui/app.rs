@@ -40,15 +40,22 @@ struct TermWorkspace {
     split: Option<Split>,
     /// 每个 pane 上次渲染尺寸（resize 检测）。
     last_sizes: Vec<Option<(u16, u16)>>,
+    /// 主机指定的主题名（主题随主机切换；None = 跟随全局）
+    theme: Option<String>,
 }
 
 impl TermWorkspace {
     fn new(s: Session) -> Self {
+        Self::with_theme(s, None)
+    }
+
+    fn with_theme(s: Session, theme: Option<String>) -> Self {
         Self {
             sessions: vec![s],
             active: 0,
             split: None,
             last_sizes: vec![None],
+            theme,
         }
     }
 
@@ -118,6 +125,8 @@ struct AddHostFields {
     /// key | password（密码主机：密码存 keychain ssh-pw:<name>）
     auth: String,
     password: String,
+    /// 主机主题（可选：主题随主机切换；空 = 跟随全局）
+    theme: String,
 }
 
 /// 「模型设置」弹窗的表单字段。
@@ -319,7 +328,13 @@ impl GuiApp {
                         return;
                     }
                 }
-                self.tabs.push(Tab::Term(TermWorkspace::new(s)));
+                let theme = if entry.theme.is_empty() {
+                    None
+                } else {
+                    Some(entry.theme.clone())
+                };
+                self.tabs
+                    .push(Tab::Term(TermWorkspace::with_theme(s, theme)));
                 self.active = self.tabs.len() - 1;
                 self.picking = false;
             }
@@ -329,8 +344,18 @@ impl GuiApp {
 
     /// 面板背景色：主题 bg 向黑方向压暗（沉浸式跟随主题）。
     fn theme_bg(&self) -> Color32 {
-        let b = self.theme.bg;
+        let b = self.current_theme().bg;
         Color32::from_rgb(b.r() / 2 + 18, b.g() / 2 + 18, b.b() / 2 + 18)
+    }
+
+    /// 当前生效主题：优先当前 tab 主机的主题（主题随主机切换），否则全局。
+    fn current_theme(&self) -> crate::gui::themes::Theme {
+        if let Some(Tab::Term(ws)) = self.tabs.get(self.active) {
+            if let Some(name) = &ws.theme {
+                return crate::gui::themes::load_theme(name);
+            }
+        }
+        self.theme.clone()
     }
 
     /// 重连当前 tab：关闭后按同主机名重新打开（需在主机簿中）。
@@ -1426,6 +1451,7 @@ impl eframe::App for GuiApp {
                     Color32::from_rgba_unmultiplied(0, 0, 0, 140),
                 );
             }
+            let cur_theme = self.current_theme();
             match self.tabs.get_mut(self.active) {
                 Some(Tab::Term(ws)) => {
                     let n = ws.sessions.len();
@@ -1440,7 +1466,7 @@ impl eframe::App for GuiApp {
                             self.last_resize = std::time::Instant::now();
                         }
                         let screen = ws.sessions[0].screen();
-                        term::draw_terminal(ui, &screen, mono_font(self.font_size), &self.theme);
+                        term::draw_terminal(ui, &screen, mono_font(self.font_size), &cur_theme);
                         // 点击终端空白处：清除输入框焦点，恢复直接输入
                         let tr = ui.available_rect_before_wrap();
                         if ui
@@ -1497,7 +1523,7 @@ impl eframe::App for GuiApp {
                                 &mut child,
                                 &screen,
                                 mono_font(self.font_size),
-                                &self.theme,
+                                &cur_theme,
                             );
                         }
                         // 分割线
@@ -1707,6 +1733,12 @@ impl eframe::App for GuiApp {
                                 );
                                 ui.end_row();
                             }
+                            ui.label("主题(可选)");
+                            ui.add(
+                                egui::TextEdit::singleline(&mut f.theme)
+                                    .hint_text("空=跟随全局；如 Snazzy/Dracula"),
+                            );
+                            ui.end_row();
                         });
                     ui.add_space(6.0);
                     ui.label(
@@ -1741,6 +1773,7 @@ impl eframe::App for GuiApp {
                                     .collect();
                                 // 认证方式：password → 密码存钥匙串（vault），
                                 // hosts.toml 只存 auth 标记不进密码
+                                entry.theme = f.theme.trim().to_string();
                                 if f.auth == "password" {
                                     entry.auth = "password".into();
                                     if !f.password.trim().is_empty() {
