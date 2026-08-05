@@ -823,4 +823,66 @@ mod tests {
         assert!(r.reply.contains("上限"));
         assert_eq!(r.tool_runs.len(), 12);
     }
+
+    /// 可编程审批器：按预设脚本依次返回结果；Deny 判定恒返回错误（与 AutoApprover 一致）。
+    struct ScriptedApprover {
+        answers: StdMutex<Vec<ApprovalResult>>,
+    }
+
+    impl ScriptedApprover {
+        fn new(answers: Vec<ApprovalResult>) -> Arc<Self> {
+            Arc::new(Self {
+                answers: StdMutex::new(answers),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl Approver for ScriptedApprover {
+        async fn ask(&self, req: &ApprovalRequest) -> Result<ApprovalResult> {
+            if let Decision::Deny { reason } = &req.decision {
+                return Err(AresError::Denied(reason.clone()));
+            }
+            let mut a = self.answers.lock().unwrap();
+            Ok(a.remove(0))
+        }
+    }
+
+    #[tokio::test]
+    async fn plan_edit_executes_edited_command() {
+        // plan 模式：审批返回编辑后的命令 → agent 重新判定并执行编辑后的命令
+        let mut l = make_loop(
+            vec![call_response("uptime"), text_response("已按编辑后命令执行")],
+            ScriptedApprover::new(vec![
+                ApprovalResult::ApprovedWithEdit("df -P".into()),
+                ApprovalResult::Approved,
+            ]),
+        );
+        let r = l.run_turn("看下 uptime").await.unwrap();
+
+        assert_eq!(r.tool_runs.len(), 1);
+        assert!(r.tool_runs[0].success);
+        // 执行的是编辑后的命令（重新判定：df -P = observer）
+        assert_eq!(r.tool_runs[0].command.as_deref(), Some("df -P"));
+        assert_eq!(r.tool_runs[0].decision_label, "observer");
+    }
+
+    #[tokio::test]
+    async fn plan_edit_cannot_bypass_deny() {
+        // 编辑成高危命令 → 重新判定命中 deny → 不执行（编辑不能绕过审批）
+        let mut l = make_loop(
+            vec![
+                call_response("uptime"),
+                text_response("编辑后的命令被策略禁止"),
+            ],
+            ScriptedApprover::new(vec![ApprovalResult::ApprovedWithEdit("rm -rf /".into())]),
+        );
+        let r = l.run_turn("看下 uptime").await.unwrap();
+
+        assert_eq!(r.tool_runs.len(), 1);
+        assert!(!r.tool_runs[0].success);
+        assert_eq!(r.tool_runs[0].decision_label, "deny");
+        // 记录的命令是编辑后的（审计可见最终目标）
+        assert_eq!(r.tool_runs[0].command.as_deref(), Some("rm -rf /"));
+    }
 }
