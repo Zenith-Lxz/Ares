@@ -6,6 +6,7 @@
 use crate::gui::approver::{GuiApprover, PendingApproval};
 use crate::gui::exec::TerminalSessionExecutor;
 use crate::gui::session::{ConnTarget, Session};
+use crate::gui::sftp::SftpPanel;
 use crate::gui::term;
 use ares_agent::{AgentLoop, ApprovalResult, TurnResult};
 use ares_core::config::{HostEntry, HostsConfig};
@@ -17,6 +18,21 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 
 const MONO: FontId = FontId::monospace(14.0);
+
+/// 一个 tab：终端会话或 SFTP 面板。
+enum Tab {
+    Term(Session),
+    Sftp(SftpPanel),
+}
+
+impl Tab {
+    fn title(&self) -> &str {
+        match self {
+            Tab::Term(s) => &s.alias,
+            Tab::Sftp(p) => &p.title,
+        }
+    }
+}
 
 /// 「添加主机」弹窗的表单字段。
 #[derive(Default)]
@@ -53,7 +69,7 @@ pub struct GuiApp {
     hosts: std::collections::BTreeMap<String, HostEntry>,
     /// 导入源：ssh_config 主机（一次性导入进主机簿）。
     ssh_imports: Vec<SshHost>,
-    tabs: Vec<Session>,
+    tabs: Vec<Tab>,
     active: usize,
     /// 当前 tab 的终端尺寸（用于 resize 检测）。
     last_size: Option<(u16, u16)>,
@@ -66,6 +82,7 @@ pub struct GuiApp {
     import_selected: std::collections::BTreeSet<String>,
     settings_modal: bool,
     settings_fields: SettingsFields,
+    error_toast: Option<String>,
     agent_open: bool,
     agent: Option<AgentBridge>,
     rt: Arc<tokio::runtime::Runtime>,
@@ -110,6 +127,7 @@ impl GuiApp {
             import_selected: std::collections::BTreeSet::new(),
             settings_modal: false,
             settings_fields: SettingsFields::default(),
+            error_toast: None,
             agent_open: false,
             agent: None,
             rt,
@@ -143,11 +161,43 @@ impl GuiApp {
         };
         match Session::open(key, &target, 24, 80, repaint) {
             Ok(s) => {
-                self.tabs.push(s);
+                self.tabs.push(Tab::Term(s));
                 self.active = self.tabs.len() - 1;
                 self.picking = false;
             }
             Err(e) => eprintln!("无法打开 {key}：{e}"),
+        }
+    }
+
+    /// 打开 SFTP 浏览 tab（Netcatty 的 SFTP 功能）。
+    fn open_sftp_tab(&mut self, key: &str) {
+        let Some(entry) = self.hosts.get(key).cloned() else {
+            return;
+        };
+        let target = ConnTarget {
+            hostname: entry.hostname.clone(),
+            user: if entry.user.is_empty() {
+                None
+            } else {
+                Some(entry.user.clone())
+            },
+            port: entry.port,
+        };
+        let user = if entry.user.is_empty() {
+            std::env::var("USER").unwrap_or_else(|_| "root".into())
+        } else {
+            entry.user.clone()
+        };
+        match SftpPanel::connect(key, &target, &user, &self.rt) {
+            Ok(p) => {
+                self.tabs.push(Tab::Sftp(p));
+                self.active = self.tabs.len() - 1;
+                self.picking = false;
+            }
+            Err(e) => {
+                self.error_toast = Some(format!("SFTP 连接失败：{e}"));
+                eprintln!("SFTP 连接失败：{e}");
+            }
         }
     }
 
@@ -162,7 +212,7 @@ impl GuiApp {
         };
         match Session::open_local(24, 80, repaint) {
             Ok(s) => {
-                self.tabs.push(s);
+                self.tabs.push(Tab::Term(s));
                 self.active = self.tabs.len() - 1;
                 self.picking = false;
             }
@@ -207,7 +257,7 @@ impl GuiApp {
         for ev in events {
             match ev {
                 egui::Event::Text(t) => {
-                    if let Some(s) = self.tabs.get(self.active) {
+                    if let Some(Tab::Term(s)) = self.tabs.get(self.active) {
                         s.write(t.as_bytes());
                     }
                 }
@@ -233,8 +283,8 @@ impl GuiApp {
                             _ => {}
                         }
                     }
-                    // 转发给当前会话（可打印字符已走 Event::Text）
-                    if let Some(s) = self.tabs.get(self.active) {
+                    // 转发给当前终端会话（可打印字符已走 Event::Text；SFTP 面板不转发）
+                    if let Some(Tab::Term(s)) = self.tabs.get(self.active) {
                         if let Some(bytes) = key_bytes(key, ctrl) {
                             s.write(&bytes);
                         }
@@ -251,10 +301,13 @@ impl GuiApp {
         }
         self.agent_open = !self.agent_open;
         if self.agent_open && self.agent.is_none() {
-            let host = self.tabs[self.active].alias.clone();
+            let Tab::Term(session) = &self.tabs[self.active] else {
+                return; // SFTP 面板不挂 Agent
+            };
+            let host = session.alias.clone();
             // 终端注入执行器：agent 的命令直接写进当前终端会话
             // （Session 内部状态全 Arc 共享，clone 后注入的是同一个会话）
-            let executor = Arc::new(TerminalSessionExecutor::new(self.tabs[self.active].clone()));
+            let executor = Arc::new(TerminalSessionExecutor::new(session.clone()));
             // GUI 审批通道
             let (approver, rx) = GuiApprover::pair();
             self.approve_rx = rx;
@@ -340,6 +393,101 @@ impl AgentBridge {
     }
 }
 
+/// SFTP 双栏浏览 UI（本地 | 远程）。
+fn sftp_ui(rt: &tokio::runtime::Runtime, ui: &mut egui::Ui, p: &mut SftpPanel) {
+    if p.busy {
+        ui.label(RichText::new("… 工作中").color(Color32::GRAY));
+    }
+    if let Some(err) = &p.error {
+        ui.colored_label(Color32::from_rgb(220, 90, 90), err);
+    }
+    ui.columns(2, |cols| {
+        // ── 本地栏 ──
+        let local = &mut cols[0];
+        local.horizontal(|ui| {
+            if ui.button("↑ 上级").clicked() {
+                p.go_up_local(rt);
+            }
+            if ui.button("⟳ 刷新").clicked() {
+                p.list_local(rt);
+            }
+        });
+        local.label(RichText::new(&p.local_path).color(Color32::from_rgb(120, 120, 130)));
+        local.separator();
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(local, |ui| {
+                for (name, is_dir, size) in p.local_entries.clone() {
+                    let icon = if is_dir { "📁" } else { "📄" };
+                    let size_txt = if is_dir {
+                        String::new()
+                    } else {
+                        format!("  {}", human_size(size))
+                    };
+                    let label = format!("{icon} {name}{size_txt}");
+                    if ui.selectable_label(false, label).double_clicked() {
+                        if is_dir {
+                            p.enter_local(rt, &name);
+                        } else {
+                            p.upload(rt, &name);
+                        }
+                    }
+                }
+            });
+
+        // ── 远程栏 ──
+        let remote = &mut cols[1];
+        remote.horizontal(|ui| {
+            if ui.button("↑ 上级").clicked() {
+                p.go_up(rt);
+            }
+            if ui.button("⟳ 刷新").clicked() {
+                let path = p.remote_path.clone();
+                p.list_remote(rt, &path);
+            }
+            if let Some(name) = p.selected.clone() {
+                if ui.button("⬇ 下载").clicked() {
+                    p.download(rt, &name);
+                }
+            }
+        });
+        remote.label(RichText::new(&p.remote_path).color(Color32::from_rgb(120, 120, 130)));
+        remote.separator();
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(remote, |ui| {
+                let mut to_enter: Option<String> = None;
+                let mut to_select: Option<String> = None;
+                for (name, is_dir, size) in p.entries.clone() {
+                    let icon = if is_dir { "📁" } else { "📄" };
+                    let size_txt = if is_dir {
+                        String::new()
+                    } else {
+                        format!("  {}", human_size(size))
+                    };
+                    let label = format!("{icon} {name}{size_txt}");
+                    let sel = p.selected.as_deref() == Some(name.as_str());
+                    let row = ui.selectable_label(sel, label);
+                    if row.double_clicked() {
+                        if is_dir {
+                            to_enter = Some(name.clone());
+                        } else {
+                            to_select = Some(name.clone());
+                        }
+                    } else if row.clicked() {
+                        to_select = Some(name.clone());
+                    }
+                }
+                if let Some(n) = to_enter {
+                    p.enter_remote(rt, &n);
+                }
+                if let Some(n) = to_select {
+                    p.selected = Some(n);
+                }
+            });
+    });
+}
+
 impl eframe::App for GuiApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // 数据驱动重画：读线程有新数据时调用 ctx.request_repaint()，
@@ -402,12 +550,13 @@ impl eframe::App for GuiApp {
             ui.horizontal(|ui| {
                 let mut to_close: Option<usize> = None;
                 let mut to_activate: Option<usize> = None;
-                for (i, s) in self.tabs.iter().enumerate() {
+                for (i, t) in self.tabs.iter().enumerate() {
                     let selected = i == self.active;
-                    let label = if s.is_exited() {
-                        format!("✗ {}", s.alias)
+                    let exited = matches!(t, Tab::Term(s) if s.is_exited());
+                    let label = if exited {
+                        format!("✗ {}", t.title())
                     } else {
-                        s.alias.clone()
+                        t.title().to_string()
                     };
                     let btn = ui.selectable_label(selected, label);
                     if btn.clicked() {
@@ -441,19 +590,25 @@ impl eframe::App for GuiApp {
         // ── 底部：状态栏 ──
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                if let Some(s) = self.tabs.get(self.active) {
-                    ui.label(
-                        RichText::new(format!(
-                            "{} · {}",
-                            s.alias,
-                            if s.is_exited() {
+                if let Some(t) = self.tabs.get(self.active) {
+                    let (label, color) = match t {
+                        Tab::Term(s) => {
+                            let st = if s.is_exited() {
                                 "已退出"
                             } else {
                                 "已连接"
-                            }
-                        ))
-                        .color(Color32::from_rgb(179, 146, 74)),
-                    );
+                            };
+                            (
+                                format!("{} · {st}", s.alias),
+                                Color32::from_rgb(179, 146, 74),
+                            )
+                        }
+                        Tab::Sftp(p) => (
+                            format!("{} · SFTP", p.title),
+                            Color32::from_rgb(90, 160, 200),
+                        ),
+                    };
+                    ui.label(RichText::new(label).color(color));
                 } else {
                     ui.label(RichText::new("无会话").color(Color32::GRAY));
                 }
@@ -480,7 +635,7 @@ impl eframe::App for GuiApp {
                             "当前主机：{}",
                             self.tabs
                                 .get(self.active)
-                                .map(|s| s.alias.clone())
+                                .map(|t| t.title().to_string())
                                 .unwrap_or_default()
                         ))
                         .color(Color32::GRAY),
@@ -544,19 +699,27 @@ impl eframe::App for GuiApp {
 
         // ── 中央：终端渲染 ──
         egui::CentralPanel::default().show(ctx, |ui| {
-            if let Some(s) = self.tabs.get(self.active) {
-                // 尺寸变化 → resize 会话
-                let (rows, cols) = term::size_for(ui, &MONO);
-                if self.last_size != Some((rows, cols)) {
-                    s.resize(rows, cols);
-                    self.last_size = Some((rows, cols));
+            match self.tabs.get_mut(self.active) {
+                Some(Tab::Term(s)) => {
+                    // 尺寸变化 → resize 会话
+                    let (rows, cols) = term::size_for(ui, &MONO);
+                    if self.last_size != Some((rows, cols)) {
+                        s.resize(rows, cols);
+                        self.last_size = Some((rows, cols));
+                    }
+                    let screen = s.screen();
+                    term::draw_terminal(ui, &screen, MONO);
                 }
-                let screen = s.screen();
-                term::draw_terminal(ui, &screen, MONO);
-            } else {
-                ui.centered_and_justified(|ui| {
-                    ui.label(RichText::new("按 + 或 Ctrl-T 选择主机连接").color(Color32::GRAY));
-                });
+                Some(Tab::Sftp(p)) => {
+                    p.poll();
+                    let rt = self.rt.clone();
+                    sftp_ui(&rt, ui, p);
+                }
+                None => {
+                    ui.centered_and_justified(|ui| {
+                        ui.label(RichText::new("按 + 或 Ctrl-T 选择主机连接").color(Color32::GRAY));
+                    });
+                }
             }
         });
 
@@ -657,6 +820,15 @@ impl eframe::App for GuiApp {
                         {
                             let key = vis[self.filter_selected.unwrap()].1.clone();
                             self.open_tab(&key);
+                            close = true;
+                        }
+                        let sftp = ui.button("SFTP 浏览").clicked();
+                        if sftp
+                            && self.filter_selected.is_some()
+                            && self.filter_selected.unwrap() < vis.len()
+                        {
+                            let key = vis[self.filter_selected.unwrap()].1.clone();
+                            self.open_sftp_tab(&key);
                             close = true;
                         }
                         if ui.button("取消").clicked() {
@@ -944,6 +1116,20 @@ impl eframe::App for GuiApp {
             }
         }
 
+        // ── 错误 toast（一次性）──
+        if let Some(msg) = self.error_toast.clone() {
+            egui::Window::new("提示")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -60.0])
+                .show(ctx, |ui| {
+                    ui.label(msg);
+                    if ui.button("知道了").clicked() {
+                        self.error_toast = None;
+                    }
+                });
+        }
+
         // 无 tab 且未在选择 → 打开选择
         if self.tabs.is_empty() && !self.picking {
             self.picking = true;
@@ -1097,5 +1283,22 @@ fn decision_label(d: &Decision) -> &'static str {
         Decision::Confirm { .. } => "confirm",
         Decision::Observer => "observer（只读）",
         Decision::Auto { .. } => "auto（自动）",
+    }
+}
+
+/// 文件大小人性化显示。
+fn human_size(bytes: u64) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = KB * 1024.0;
+    const GB: f64 = MB * 1024.0;
+    let b = bytes as f64;
+    if b >= GB {
+        format!("{:.1} GB", b / GB)
+    } else if b >= MB {
+        format!("{:.1} MB", b / MB)
+    } else if b >= KB {
+        format!("{:.1} KB", b / KB)
+    } else {
+        format!("{bytes} B")
     }
 }

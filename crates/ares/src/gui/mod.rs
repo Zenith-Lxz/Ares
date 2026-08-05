@@ -4,6 +4,7 @@ pub mod app;
 pub mod approver;
 pub mod exec;
 pub mod session;
+pub mod sftp;
 pub mod term;
 
 pub use app::GuiApp;

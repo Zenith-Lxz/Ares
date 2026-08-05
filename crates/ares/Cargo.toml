@@ -32,6 +32,8 @@ eframe = "0.30"
 vt100 = "0.15"
 egui = "0.30"
 async-trait = "0.1.91"
+russh = { version = "0.62", default-features = false, features = ["ring", "flate2"] }
+russh-sftp = "2"
 
 [dev-dependencies]
 tempfile = "3"
