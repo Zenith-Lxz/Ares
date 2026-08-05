@@ -4,14 +4,14 @@
 //! Agent 面板（Ctrl-a a）· 底部状态栏。主机选择弹窗读 `~/.ssh/config`。
 
 use crate::gui::approver::{GuiApprover, PendingApproval};
-use crate::gui::exec::TerminalSessionExecutor;
+use crate::gui::exec::{RoutedExecutor, TerminalSessionExecutor};
 use crate::gui::session::{ConnTarget, Session};
 use crate::gui::sftp::SftpPanel;
 use crate::gui::term;
 use ares_agent::{AgentLoop, ApprovalResult, TurnResult};
 use ares_core::config::{HostEntry, HostsConfig};
 use ares_core::ssh_config::{self, SshHost};
-use ares_core::{Decision, Env};
+use ares_core::{Decision, Env, HostId};
 use ares_llm::config::{ProviderEntry, ProviderKind, ProvidersConfig};
 use egui::{Color32, FontFamily, FontId, RichText};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -150,6 +150,8 @@ pub struct GuiApp {
     agent_open: bool,
     /// 分屏待定方向：用户按分屏快捷键后进入主机选择，选中即分屏。
     split_pending: Option<Split>,
+    /// Agent 目标主机集合（多主机编排；chips 多选）。
+    agent_targets: std::collections::BTreeSet<String>,
     agent: Option<AgentBridge>,
     rt: Arc<tokio::runtime::Runtime>,
     /// 供读线程触发的重画句柄（Session 构造时使用）。
@@ -201,6 +203,7 @@ impl GuiApp {
             error_toast: None,
             agent_open: false,
             split_pending: None,
+            agent_targets: std::collections::BTreeSet::new(),
             agent: None,
             rt,
             egui_ctx: None,
@@ -448,17 +451,27 @@ impl GuiApp {
             };
             let session = &ws.sessions[ws.active];
             let host = session.alias.clone();
+            // 多主机编排：默认只操作当前 pane 主机；用户在面板 chips 可
+            // 勾选更多主机（RoutedExecutor：当前 pane 注入，其他走 ssh）
+            if self.agent_targets.is_empty() {
+                self.agent_targets.insert(host.clone());
+            }
+            let scope: Vec<HostId> = self
+                .agent_targets
+                .iter()
+                .map(|h| ares_core::HostId::new(h.clone()))
+                .collect();
             // 终端注入执行器：agent 的命令直接写进当前终端会话
             // （Session 内部状态全 Arc 共享，clone 后注入的是同一个会话）
-            let executor = Arc::new(TerminalSessionExecutor::new(session.clone()));
+            let current = TerminalSessionExecutor::new(session.clone());
+            let executor = Arc::new(RoutedExecutor::new(current, HostId::new(host.clone())));
             // GUI 审批通道
             let (approver, rx) = GuiApprover::pair();
             self.approve_rx = rx;
-            match self.rt.block_on(crate::build_agent(
-                vec![ares_core::HostId::new(host.clone())],
-                executor,
-                Arc::new(approver),
-            )) {
+            match self
+                .rt
+                .block_on(crate::build_agent(scope, executor, Arc::new(approver)))
+            {
                 Ok(agent) => {
                     self.agent = Some(AgentBridge::new(agent));
                 }
@@ -814,6 +827,34 @@ impl eframe::App for GuiApp {
                         ))
                         .color(Color32::GRAY),
                     );
+                    // 目标主机 chips（多主机编排：勾选后 agent 可操作多台；
+                    // 当前 pane 注入，其他主机走 ssh 通道）
+                    ui.horizontal_wrapped(|ui| {
+                        let mut changed = false;
+                        let mut candidates: Vec<String> = self.hosts.keys().cloned().collect();
+                        if let Some(t) = self.tabs.get(self.active) {
+                            let title = t.title().to_string();
+                            if !candidates.contains(&title) {
+                                candidates.push(title);
+                            }
+                        }
+                        for host in candidates {
+                            let mut sel = self.agent_targets.contains(&host);
+                            if ui.selectable_label(sel, &host).clicked() {
+                                changed = true;
+                                if sel {
+                                    self.agent_targets.remove(&host);
+                                } else {
+                                    self.agent_targets.insert(host);
+                                }
+                            }
+                        }
+                        // 目标变更 → 重建 agent（scope 已变）
+                        if changed {
+                            self.agent = None;
+                            self.agent_open = false;
+                        }
+                    });
                     ui.separator();
 
                     if let Some(a) = &mut self.agent {

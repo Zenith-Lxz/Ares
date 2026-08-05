@@ -120,3 +120,36 @@ mod tests {
         assert_eq!(diff_since("", "new\noutput"), "new\noutput");
     }
 }
+
+/// 多主机路由执行器（2026-08-05 多主机编排）：
+/// 当前 pane 主机 → 终端注入（用户看得见）；其他主机 → SshExecutor 独立通道。
+pub struct RoutedExecutor {
+    current: TerminalSessionExecutor,
+    current_host: HostId,
+    ssh: ares_exec::SshExecutor,
+}
+
+impl RoutedExecutor {
+    pub fn new(current: TerminalSessionExecutor, current_host: HostId) -> Self {
+        Self {
+            current,
+            current_host,
+            ssh: ares_exec::SshExecutor::new(),
+        }
+    }
+}
+
+#[async_trait]
+impl Executor for RoutedExecutor {
+    async fn execute(&self, req: ExecRequest) -> Result<ExecOutcome> {
+        if req.host == self.current_host {
+            self.current.execute(req).await
+        } else {
+            self.ssh.execute(req).await
+        }
+    }
+
+    fn supports(&self, _host: &HostId) -> bool {
+        true
+    }
+}
