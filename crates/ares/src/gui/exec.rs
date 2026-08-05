@@ -36,17 +36,24 @@ impl Executor for TerminalSessionExecutor {
         self.session.write(req.command.as_bytes());
         self.session.write(b"\r");
 
-        // 等待输出稳定或超时
+        // 等待「变化出现 → 稳定」或超时。
+        //
+        // 注意：注入后立即采样是旧屏幕（ssh 网络延迟，输出还没到），
+        // 不能把「还没变化」误判为「已稳定」—— 必须等到屏幕
+        // 相对注入前发生变化，且之后连续两次采样相同才算完成。
         let deadline = started + req.timeout;
         let mut last = self.session.snapshot_text();
+        let mut changed = false;
         let mut timed_out = false;
         loop {
             tokio::time::sleep(SAMPLE).await;
             let now = self.session.snapshot_text();
-            if now == last {
-                break; // 输出稳定（命令结束，含提示符）
+            if now != last {
+                changed = true;
+                last = now;
+            } else if changed {
+                break; // 变化之后稳定：命令结束（含提示符）
             }
-            last = now;
             if Instant::now() >= deadline {
                 timed_out = true;
                 break;
