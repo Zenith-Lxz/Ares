@@ -82,6 +82,7 @@ dependencies = [
  "ares-tools",
  "clap",
  "rpassword",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
