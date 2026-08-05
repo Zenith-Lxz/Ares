@@ -35,7 +35,7 @@ async-trait = "0.1.91"
 russh = { version = "0.62", default-features = false, features = ["ring", "flate2"] }
 russh-sftp = "2"
 serde_json.workspace = true
-rmcp = { version = "2.2", features = ["client", "transport-child-process"] }
+rmcp = { version = "2.2", features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest"] }
 serde.workspace = true
 egui_commonmark = "0.19.0"
 plist = "1.7.4"

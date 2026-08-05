@@ -17,6 +17,7 @@ use ares_core::ToolCategory;
 use ares_tools::{Tool, ToolContext, ToolOutput};
 use rmcp::model::{CallToolRequestParams, ContentBlock};
 use rmcp::transport::child_process::TokioChildProcess;
+use rmcp::transport::StreamableHttpClientTransport;
 use rmcp::ServiceExt;
 use std::sync::Arc;
 
@@ -56,6 +57,11 @@ struct McpConfig {
 
 #[derive(serde::Deserialize)]
 struct ServerConfig {
+    /// 远程 HTTP(S) MCP endpoint（streamable HTTP，含 SSE 流式）——
+    /// 配置 url 时忽略 command/args（远程 server，不启动子进程）
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
     command: String,
     #[serde(default)]
     args: Vec<String>,
@@ -72,13 +78,22 @@ fn load_config() -> Option<McpConfig> {
 
 /// 连接一个 server 并列出其工具。
 async fn connect_server(name: &str, cfg: &ServerConfig) -> Result<Vec<Arc<dyn Tool>>, String> {
-    let mut cmd = tokio::process::Command::new(&cfg.command);
-    cmd.args(&cfg.args);
-    for (k, v) in &cfg.env {
-        cmd.env(k, v);
-    }
-    let transport = TokioChildProcess::new(cmd).map_err(|e| format!("启动失败：{e}"))?;
-    let client = ().serve(transport).await.map_err(|e| format!("握手失败：{e}"))?;
+    // 远程 HTTP(S) MCP（streamable HTTP + SSE 流式）；否则 stdio 子进程
+    let client = if let Some(url) = &cfg.url {
+        ().serve(StreamableHttpClientTransport::from_uri(url.clone()))
+            .await
+            .map_err(|e| format!("握手失败：{e}"))?
+    } else {
+        let mut cmd = tokio::process::Command::new(&cfg.command);
+        cmd.args(&cfg.args);
+        for (k, v) in &cfg.env {
+            cmd.env(k, v);
+        }
+        let transport = TokioChildProcess::new(cmd).map_err(|e| format!("启动失败：{e}"))?;
+        ().serve(transport)
+            .await
+            .map_err(|e| format!("握手失败：{e}"))?
+    };
     let peer = client.peer().clone();
     let tools = peer
         .list_all_tools()
