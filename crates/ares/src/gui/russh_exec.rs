@@ -120,7 +120,7 @@ async fn exec_remote(
         // keychain account: ssh-pw:<alias>（GUI 添加主机时写入）
         match ares_darwin::keychain::get_secret(&format!("ssh-pw:{alias}")) {
             Ok(Some(pw)) => {
-                if let Ok(auth_res) = session.authenticate_password(user, pw.clone()).await {
+                if let Ok(auth_res) = session.authenticate_password(user, pw).await {
                     authed = auth_res.success();
                 }
             }

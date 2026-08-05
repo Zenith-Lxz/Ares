@@ -31,7 +31,8 @@ pub struct Session {
 }
 
 impl Session {
-    /// 打开一个 ssh 会话（rows×cols 初始尺寸）。
+    /// 打开一个 ssh 会话（rows×cols 初始尺寸；密钥认证）。
+    #[allow(dead_code)]
     ///
     /// `alias` 是 tab 标题；连接参数来自主机簿（hostname/user/port），
     /// hostname 为空时回退直接用 alias（兼容仅填了别名的条目）。

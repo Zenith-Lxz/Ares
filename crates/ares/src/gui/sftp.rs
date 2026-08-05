@@ -241,7 +241,7 @@ async fn connect_sftp(
     if auth == "password" {
         match ares_darwin::keychain::get_secret(&format!("ssh-pw:{alias}")) {
             Ok(Some(pw)) => {
-                if let Ok(res) = session.authenticate_password(user, pw.clone()).await {
+                if let Ok(res) = session.authenticate_password(user, pw).await {
                     authed = res.success();
                 }
             }
