@@ -179,4 +179,29 @@ keychain_account = "k"
         );
         assert!(ProvidersConfig::load_from(f.path()).is_err());
     }
+
+    #[test]
+    fn save_roundtrip_preserves_providers() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("providers.toml");
+        let mut cfg = ProvidersConfig::default();
+        cfg.providers.insert(
+            "deepseek".into(),
+            ProviderEntry {
+                kind: ProviderKind::Openai,
+                base_url: "https://api.deepseek.com/v1".into(),
+                model: "deepseek-chat".into(),
+                keychain_account: "llm:deepseek".into(),
+            },
+        );
+        cfg.active = "deepseek".into();
+        cfg.save_to(&path).unwrap();
+
+        let loaded = ProvidersConfig::load_from(&path).unwrap();
+        assert_eq!(loaded.active, "deepseek");
+        let e = &loaded.providers["deepseek"];
+        assert_eq!(e.kind, ProviderKind::Openai);
+        assert_eq!(e.model, "deepseek-chat");
+        assert_eq!(e.keychain_account, "llm:deepseek");
+    }
 }
