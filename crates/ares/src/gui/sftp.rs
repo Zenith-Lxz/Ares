@@ -248,8 +248,7 @@ async fn connect_sftp(
             _ => {
                 return Err(format!(
                     "认证失败：{alias} 配置了密码认证但钥匙串中没有密码（ssh-pw:{alias}）"
-                )
-                .into());
+                ));
             }
         }
     } else {
