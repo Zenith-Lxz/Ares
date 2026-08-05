@@ -50,20 +50,7 @@ fn color_256(i: u8) -> Color32 {
     }
 }
 
-/// 行渲染缓存：记录每行签名（文本+颜色），未变化的行跳过重画。
-/// 终端静止时（提示符等待输入）零 text 绘制 —— 卡顿的主要来源。
-#[derive(Default)]
-pub struct TermCache {
-    row_sigs: Vec<u64>,
-}
-
-/// 把 vt100 屏幕画进 ui 区域。返回实际渲染的（行数, 列数）。
-pub fn draw_terminal(
-    ui: &mut egui::Ui,
-    screen: &vt100::Screen,
-    font: FontId,
-    cache: &mut TermCache,
-) -> (u16, u16) {
+pub fn draw_terminal(ui: &mut egui::Ui, screen: &vt100::Screen, font: FontId) -> (u16, u16) {
     let (rows, cols) = screen.size();
     let painter = ui.painter();
 
@@ -73,44 +60,24 @@ pub fn draw_terminal(
         return (rows, cols);
     }
 
-    // 扩展缓存
-    if cache.row_sigs.len() < rows as usize {
-        cache.row_sigs.resize(rows as usize, u64::MAX);
-    }
-
     let origin = ui.min_rect().min;
     let cursor = screen.cursor_position();
+    let lay = RowLayout {
+        origin,
+        cell_w,
+        cell_h,
+        font: font.clone(),
+    };
 
+    // egui 即时模式：每帧全画（上一帧不保留）。静止时由数据驱动
+    // repaint 控制（读线程无数据不触发重画 → egui 不重画帧 → 画面保留）。
     for r in 0..rows {
-        let sig = row_signature(screen, r, cols);
-        if cache.row_sigs[r as usize] == sig {
-            continue; // 此行未变化
-        }
-        cache.row_sigs[r as usize] = sig;
-        let lay = RowLayout {
-            origin,
-            cell_w,
-            cell_h,
-            font: font.clone(),
-        };
         draw_row(painter, screen, r, cols, &lay);
     }
 
-    // 光标：反色块（光标行总是重画一次，保证光标可见）
+    // 光标：反色块
     let (cr, cc) = cursor;
     if cr < rows && cc < cols {
-        // 光标行强制重画（签名可能没变化但光标位置变了）
-        let sig = row_signature(screen, cr, cols);
-        cache.row_sigs[cr as usize] = u64::MAX;
-        let _ = sig;
-        let lay = RowLayout {
-            origin,
-            cell_w,
-            cell_h,
-            font: font.clone(),
-        };
-        draw_row(painter, screen, cr, cols, &lay);
-        cache.row_sigs[cr as usize] = row_signature(screen, cr, cols);
         let pos = pos2(origin.x + cc as f32 * cell_w, origin.y + cr as f32 * cell_h);
         if let Some(cell) = screen.cell(cr, cc) {
             let fg = color(cell.fgcolor());
@@ -174,32 +141,6 @@ fn draw_row(painter: &egui::Painter, screen: &vt100::Screen, r: u16, cols: u16, 
     }
 }
 
-/// 行签名：文本 + 前景/背景色的 FNV 哈希。颜色或内容任何变化都触发重画。
-fn row_signature(screen: &vt100::Screen, r: u16, cols: u16) -> u64 {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for c in 0..cols {
-        if let Some(cell) = screen.cell(r, c) {
-            for b in cell.contents().bytes() {
-                h = (h ^ b as u64).wrapping_mul(0x100_0000_01b3);
-            }
-            h = (h ^ color_key(cell.fgcolor())).wrapping_mul(0x100_0000_01b3);
-            h = (h ^ color_key(cell.bgcolor())).wrapping_mul(0x100_0000_01b3);
-        }
-        h = (h ^ 0x1f).wrapping_mul(0x100_0000_01b3);
-    }
-    h
-}
-
-fn color_key(c: vt100::Color) -> u64 {
-    match c {
-        vt100::Color::Default => 0,
-        vt100::Color::Idx(i) => 1 + i as u64,
-        vt100::Color::Rgb(r, g, b) => {
-            0x0100_0000 | ((r as u64) << 16) | ((g as u64) << 8) | b as u64
-        }
-    }
-}
-
 /// 从 ui 区域推导终端行列数（等宽字体）。
 pub fn size_for(ui: &egui::Ui, font: &FontId) -> (u16, u16) {
     let cell_w = ui.fonts(|f| f.glyph_width(font, 'M'));
@@ -234,30 +175,5 @@ mod tests {
     fn gray_ramp_monotonic() {
         assert_eq!(color_256(232), Color32::from_rgb(8, 8, 8));
         assert_eq!(color_256(255), Color32::from_rgb(238, 238, 238));
-    }
-
-    #[test]
-    fn row_signature_differs_on_content_and_color() {
-        let mut p = vt100::Parser::new(3, 40, 0);
-        p.process(b"plain text");
-        let s1 = p.screen();
-        let sig_a = row_signature(s1, 0, 40);
-        let _ = &s1;
-        // 改颜色（同文本）
-        p.process(b"\x1b[H\x1b[31mplain text");
-        let sig_b = row_signature(p.screen(), 0, 40);
-        assert_ne!(sig_a, sig_b, "颜色变化必须改变签名");
-        // 清空重写不同文本
-        p.process(b"\x1b[2J\x1b[Hother text");
-        let sig_c = row_signature(p.screen(), 0, 40);
-        assert_ne!(sig_a, sig_c, "内容变化必须改变签名");
-        // 相同内容签名稳定
-        let mut p2 = vt100::Parser::new(3, 40, 0);
-        p2.process(b"plain text");
-        assert_eq!(
-            sig_a,
-            row_signature(p2.screen(), 0, 40),
-            "相同内容签名应一致"
-        );
     }
 }

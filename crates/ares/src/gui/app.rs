@@ -6,11 +6,12 @@
 use crate::gui::approver::{GuiApprover, PendingApproval};
 use crate::gui::exec::TerminalSessionExecutor;
 use crate::gui::session::{ConnTarget, Session};
-use crate::gui::term::{self, TermCache};
+use crate::gui::term;
 use ares_agent::{AgentLoop, ApprovalResult, TurnResult};
 use ares_core::config::{HostEntry, HostsConfig};
 use ares_core::ssh_config::{self, SshHost};
 use ares_core::{Decision, Env};
+use ares_llm::config::{ProviderEntry, ProviderKind, ProvidersConfig};
 use egui::{Color32, FontFamily, FontId, RichText};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
@@ -26,6 +27,25 @@ struct AddHostFields {
     port: String,
     env: String,
     tags: String,
+}
+
+/// 「模型设置」弹窗的表单字段。
+struct SettingsFields {
+    name: String,
+    base_url: String,
+    model: String,
+    api_key: String,
+}
+
+impl Default for SettingsFields {
+    fn default() -> Self {
+        Self {
+            name: "deepseek".into(),
+            base_url: "https://api.deepseek.com/v1".into(),
+            model: "deepseek-chat".into(),
+            api_key: String::new(),
+        }
+    }
 }
 
 pub struct GuiApp {
@@ -44,16 +64,16 @@ pub struct GuiApp {
     add_fields: AddHostFields,
     import_modal: bool,
     import_selected: std::collections::BTreeSet<String>,
+    settings_modal: bool,
+    settings_fields: SettingsFields,
     agent_open: bool,
     agent: Option<AgentBridge>,
     rt: Arc<tokio::runtime::Runtime>,
+    /// 供读线程触发的重画句柄（Session 构造时使用）。
+    egui_ctx: Option<egui::Context>,
     /// GUI 审批通道：agent 线程 → GUI 主线程
     approve_rx: std::sync::mpsc::Receiver<PendingApproval>,
     pending_approval: Option<PendingApproval>,
-    /// 终端渲染缓存（行签名，静止时零绘制）
-    term_cache: TermCache,
-    /// 各 tab 上次渲染时的数据版本（决定是否重画）
-    tab_versions: Vec<u64>,
 }
 
 struct AgentBridge {
@@ -88,13 +108,14 @@ impl GuiApp {
             add_fields: AddHostFields::default(),
             import_modal: false,
             import_selected: std::collections::BTreeSet::new(),
+            settings_modal: false,
+            settings_fields: SettingsFields::default(),
             agent_open: false,
             agent: None,
             rt,
+            egui_ctx: None,
             approve_rx: std::sync::mpsc::channel().1,
             pending_approval: None,
-            term_cache: TermCache::default(),
-            tab_versions: Vec::new(),
         }
     }
 
@@ -113,7 +134,14 @@ impl GuiApp {
             },
             port: entry.port,
         };
-        match Session::open(key, &target, 24, 80) {
+        let repaint: Arc<dyn Fn() + Send + Sync> = match &self.egui_ctx {
+            Some(ctx) => Arc::new({
+                let ctx = ctx.clone();
+                move || ctx.request_repaint()
+            }),
+            None => Arc::new(|| {}),
+        };
+        match Session::open(key, &target, 24, 80, repaint) {
             Ok(s) => {
                 self.tabs.push(s);
                 self.active = self.tabs.len() - 1;
@@ -295,9 +323,9 @@ impl AgentBridge {
 
 impl eframe::App for GuiApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // 数据驱动重画：终端静止时 egui 不重画（省 CPU）；
-        // 轮询保证新数据最多 33ms 延迟显示
-        ctx.request_repaint_after(std::time::Duration::from_millis(33));
+        // 数据驱动重画：读线程有新数据时调用 ctx.request_repaint()，
+        // 静止时 egui 不重画（画面保留、CPU 为零）
+        self.egui_ctx = Some(ctx.clone());
 
         // 处理输入（转发 / 快捷键）
         self.handle_input(ctx);
@@ -487,7 +515,10 @@ impl eframe::App for GuiApp {
                             resp.request_focus();
                         }
                     } else {
-                        ui.label("Agent 未就绪（需配置 provider）。");
+                        ui.label("Agent 未就绪（需配置模型）。");
+                        if ui.button("⚙ 配置模型").clicked() {
+                            self.settings_modal = true;
+                        }
                     }
                 });
         }
@@ -500,23 +531,9 @@ impl eframe::App for GuiApp {
                 if self.last_size != Some((rows, cols)) {
                     s.resize(rows, cols);
                     self.last_size = Some((rows, cols));
-                    // 尺寸变化后整屏缓存失效
-                    self.term_cache = TermCache::default();
                 }
-                // 数据版本未变且非首次 → 跳过重画（保留上次画面）
-                let v = s.version();
-                let cached = self.tab_versions.get(self.active).copied();
-                if cached != Some(v) {
-                    let screen = s.screen();
-                    term::draw_terminal(ui, &screen, MONO, &mut self.term_cache);
-                    if self.tab_versions.len() <= self.active {
-                        self.tab_versions.resize(self.active + 1, 0);
-                    }
-                    self.tab_versions[self.active] = v;
-                } else {
-                    // 无新数据：占用空间保持布局稳定
-                    let _ = ui.allocate_rect(ui.available_rect_before_wrap(), egui::Sense::hover());
-                }
+                let screen = s.screen();
+                term::draw_terminal(ui, &screen, MONO);
             } else {
                 ui.centered_and_justified(|ui| {
                     ui.label(RichText::new("按 + 或 Ctrl-T 选择主机连接").color(Color32::GRAY));
@@ -770,6 +787,121 @@ impl eframe::App for GuiApp {
                 });
             if close {
                 self.import_modal = false;
+            }
+        }
+
+        // ── 模型设置弹窗 ──
+        if self.settings_modal {
+            let mut close = false;
+            let mut saved = false;
+            let mut save_err: Option<String> = None;
+            egui::Window::new("模型设置")
+                .collapsible(false)
+                .resizable(false)
+                .default_size([420.0, 0.0])
+                .show(ctx, |ui| {
+                    let f = &mut self.settings_fields;
+                    // 预设快捷填充
+                    ui.horizontal(|ui| {
+                        ui.label("预设：");
+                        if ui.button("DeepSeek").clicked() {
+                            f.name = "deepseek".into();
+                            f.base_url = "https://api.deepseek.com/v1".into();
+                            f.model = "deepseek-chat".into();
+                        }
+                        if ui.button("Anthropic").clicked() {
+                            f.name = "anthropic".into();
+                            f.base_url = "https://api.anthropic.com/v1".into();
+                            f.model = "claude-sonnet-4-5".into();
+                        }
+                        if ui.button("OpenRouter").clicked() {
+                            f.name = "openrouter".into();
+                            f.base_url = "https://openrouter.ai/api/v1".into();
+                            f.model = "deepseek/deepseek-chat".into();
+                        }
+                    });
+                    ui.separator();
+                    egui::Grid::new("settings_grid")
+                        .num_columns(2)
+                        .spacing([8.0, 6.0])
+                        .show(ui, |ui| {
+                            ui.label("名称");
+                            ui.text_edit_singleline(&mut f.name);
+                            ui.end_row();
+                            ui.label("Base URL");
+                            ui.text_edit_singleline(&mut f.base_url);
+                            ui.end_row();
+                            ui.label("模型");
+                            ui.text_edit_singleline(&mut f.model);
+                            ui.end_row();
+                            ui.label("API Key");
+                            ui.add(egui::TextEdit::singleline(&mut f.api_key).password(true));
+                            ui.end_row();
+                        });
+                    ui.add_space(4.0);
+                    ui.label(
+                        RichText::new(
+                            "Key 写入 macOS 钥匙串（llm:<名称>），providers.toml 只存账户名。",
+                        )
+                        .color(Color32::GRAY),
+                    );
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        if ui.button(RichText::new("保存").strong()).clicked() {
+                            let name = f.name.trim().to_string();
+                            if name.is_empty() || f.api_key.trim().is_empty() {
+                                save_err = Some("名称与 API Key 不能为空".into());
+                            } else {
+                                // 写 providers.toml（保留已有其他 provider）
+                                let mut cfg = ProvidersConfig::load().unwrap_or_default();
+                                cfg.providers.insert(
+                                    name.clone(),
+                                    ProviderEntry {
+                                        kind: ProviderKind::Openai,
+                                        base_url: f.base_url.trim().to_string(),
+                                        model: f.model.trim().to_string(),
+                                        keychain_account: format!("llm:{name}"),
+                                    },
+                                );
+                                cfg.active = name.clone();
+                                match cfg.save() {
+                                    Ok(()) => {
+                                        // 写 Keychain
+                                        match ares_darwin::keychain::set_secret(
+                                            &format!("llm:{name}"),
+                                            f.api_key.trim(),
+                                        ) {
+                                            Ok(()) => {
+                                                saved = true;
+                                                close = true;
+                                            }
+                                            Err(e) => {
+                                                save_err = Some(format!("写入钥匙串失败：{e}"));
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        save_err = Some(format!("保存配置失败：{e}"));
+                                    }
+                                }
+                            }
+                        }
+                        if ui.button("取消").clicked() {
+                            close = true;
+                        }
+                    });
+                    if let Some(err) = &save_err {
+                        ui.colored_label(Color32::from_rgb(220, 90, 90), err);
+                    }
+                });
+            if saved {
+                self.settings_modal = false;
+                // 已配置模型：若 Agent 面板此前因缺 provider 失败，重试打开
+                self.agent_open = false;
+                self.agent = None;
+            }
+            if close {
+                self.settings_modal = false;
             }
         }
 

@@ -68,6 +68,24 @@ impl ProvidersConfig {
         Ok(cfg)
     }
 
+    /// 保存到默认位置（`~/.config/ares/providers.toml`）。
+    pub fn save(&self) -> Result<()> {
+        self.save_to(paths::config_dir().join("providers.toml"))
+    }
+
+    pub fn save_to(&self, path: impl AsRef<Path>) -> Result<()> {
+        let path = path.as_ref();
+        let text = toml::to_string_pretty(self)
+            .map_err(|e| AresError::Config(format!("序列化 providers.toml 失败：{e}")))?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                AresError::Config(format!("无法创建目录 {}: {e}", parent.display()))
+            })?;
+        }
+        std::fs::write(path, text)
+            .map_err(|e| AresError::Config(format!("无法写入 {}: {e}", path.display())))
+    }
+
     /// 当前激活的 provider。未指定 active 时取字典序第一个。
     pub fn active_entry(&self) -> Result<(&str, &ProviderEntry)> {
         if !self.active.is_empty() {
