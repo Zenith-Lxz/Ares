@@ -135,6 +135,8 @@ pub struct GuiApp {
     active: usize,
     /// 当前 tab 的终端尺寸（用于 resize 检测）。
     last_size: Option<(u16, u16)>,
+    /// resize 节流：150ms 内只允许一次（防 SIGWINCH 风暴）。
+    last_resize: std::time::Instant,
     picking: bool,
     filter: String,
     filter_selected: Option<usize>,
@@ -182,6 +184,7 @@ impl GuiApp {
             tabs: Vec::new(),
             active: 0,
             last_size: None,
+            last_resize: std::time::Instant::now(),
             picking: true, // 启动即打开主机选择
             filter: String::new(),
             filter_selected: None,
@@ -854,9 +857,12 @@ impl eframe::App for GuiApp {
                     if n == 1 {
                         // 单 pane：尺寸变化 → resize 会话
                         let (rows, cols) = term::size_for(ui, &MONO);
-                        if self.last_size != Some((rows, cols)) {
+                        if self.last_size != Some((rows, cols))
+                            && self.last_resize.elapsed() > std::time::Duration::from_millis(150)
+                        {
                             ws.sessions[0].resize(rows, cols);
                             self.last_size = Some((rows, cols));
+                            self.last_resize = std::time::Instant::now();
                         }
                         let screen = ws.sessions[0].screen();
                         term::draw_terminal(ui, &screen, MONO);
@@ -903,9 +909,13 @@ impl eframe::App for GuiApp {
                                     0.0
                                 })));
                             let (rows, cols) = term::size_for(&child, &MONO);
-                            if ws.last_sizes[i] != Some((rows, cols)) {
+                            if ws.last_sizes[i] != Some((rows, cols))
+                                && self.last_resize.elapsed()
+                                    > std::time::Duration::from_millis(150)
+                            {
                                 s.resize(rows, cols);
                                 ws.last_sizes[i] = Some((rows, cols));
+                                self.last_resize = std::time::Instant::now();
                             }
                             let screen = s.screen();
                             term::draw_terminal(&mut child, &screen, MONO);
