@@ -5,6 +5,7 @@
 //! 因此这个 trait 不得出现任何本地或远程专有的概念。
 
 pub mod local;
+pub mod ssh;
 
 use ares_core::{HostId, Result};
 use async_trait::async_trait;
@@ -12,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 pub use local::LocalExecutor;
+pub use ssh::SshExecutor;
 
 /// 默认命令超时。运维命令很少需要超过这个时长；
 /// 真正的长任务应走 terminal_start/poll 而非 execute。

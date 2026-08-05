@@ -19,7 +19,12 @@ impl HostId {
 
     /// 本机伪主机。M1 的全部操作都发生在这上面。
     pub fn localhost() -> Self {
-        Self("localhost".to_string())
+        Self("localhost".into())
+    }
+
+    /// 是否本机（localhost / 127.0.0.1 / ::1）。SshExecutor 用此判断回退。
+    pub fn is_local(&self) -> bool {
+        matches!(self.0.as_str(), "localhost" | "127.0.0.1" | "::1")
     }
 
     pub fn as_str(&self) -> &str {

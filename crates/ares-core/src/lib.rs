@@ -7,6 +7,7 @@ pub mod display;
 pub mod error;
 pub mod paths;
 pub mod redact;
+pub mod ssh_config;
 pub mod types;
 
 pub use error::{AresError, Result};
