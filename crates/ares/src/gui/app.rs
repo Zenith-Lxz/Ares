@@ -348,11 +348,21 @@ impl GuiApp {
     fn handle_input(&mut self, ctx: &egui::Context) {
         let any_focus = ctx.memory(|m| m.focused().is_some());
         let events = ctx.input(|i| i.events.clone());
+        // Enter 去重：egui/winit 对回车同时产生 Key(Enter) 与 Text("\r")
+        // 两个事件，若都转发 shell 会收到两次回车 → 结果后多一个空行。
+        // （2026-08-05 用户反馈「命令返回结果多一个回车」）
+        let mut enter_forwarded = false;
         for ev in events {
             match ev {
                 egui::Event::Text(t) => {
                     if !any_focus {
                         if let Some(Tab::Term(w)) = self.tabs.get(self.active) {
+                            if t == "\r" || t == "\n" {
+                                if enter_forwarded {
+                                    continue; // Key(Enter) 已转发
+                                }
+                                enter_forwarded = true;
+                            }
                             w.sessions[w.active].write(t.as_bytes());
                         }
                     }
@@ -390,9 +400,15 @@ impl GuiApp {
                         }
                     }
                     // 转发给当前终端会话（可打印字符已走 Event::Text；SFTP 面板不转发；
-                    // 输入框聚焦时不转发）
+                    // 输入框聚焦时不转发；Enter 与 Text 事件去重）
                     if !any_focus {
                         if let Some(Tab::Term(w)) = self.tabs.get(self.active) {
+                            if key == egui::Key::Enter {
+                                if enter_forwarded {
+                                    continue; // Text("\r") 已转发
+                                }
+                                enter_forwarded = true;
+                            }
                             if let Some(bytes) = key_bytes(key, ctrl) {
                                 w.sessions[w.active].write(&bytes);
                             }
