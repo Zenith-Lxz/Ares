@@ -186,6 +186,7 @@ impl GpuTerminalRenderer {
     }
 
     /// 渲染终端到纹理；返回 egui TextureId（调用方 painter.image 绘制）。
+    #[allow(clippy::too_many_arguments)]
     pub fn render(
         &mut self,
         screen: &vt100::Screen,
@@ -230,7 +231,7 @@ impl GpuTerminalRenderer {
         }
 
         // 逐行：hash 变化才重建 shaping
-        for r in 0..rows as u16 {
+        for r in 0..rows {
             let h = row_hash(
                 screen,
                 r,
