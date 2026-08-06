@@ -17,7 +17,7 @@ use ares_core::{Decision, Env, HostId};
 use ares_llm::config::{ProviderEntry, ProviderKind, ProvidersConfig};
 use ares_tools::Tool;
 use egui::{Color32, FontFamily, FontId, RichText};
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Arc;
 
 fn mono_font(size: f32) -> FontId {
@@ -242,7 +242,10 @@ enum AgentEvent {
     /// 自进化反思结果（已写入记忆库的摘要）
     Reflection(String),
     /// 后台构建 Agent 完成（成功 → bridge 数据；失败 → 错误文本）
-    AgentBuilt(Result<AgentLoop, String>, Option<Vec<(String, String)>>),
+    AgentBuilt(
+        Result<Box<AgentLoop>, String>,
+        Option<Vec<(String, String)>>,
+    ),
 }
 
 impl GuiApp {
@@ -675,7 +678,7 @@ impl GuiApp {
             rt.spawn(async move {
                 let result = crate::build_agent(scope, executor, approver, mcp_tools).await;
                 tx.send(AgentEvent::AgentBuilt(
-                    result.map_err(|e| e.to_string()),
+                    result.map(Box::new).map_err(|e| e.to_string()),
                     restore_msgs,
                 ))
                 .ok();
@@ -888,7 +891,10 @@ impl AgentBridge {
 
 /// AgentBridge::poll 的返回：AgentBuilt 事件（GUI 层处理）。
 enum PollOutcome {
-    Built(Result<AgentLoop, String>, Option<Vec<(String, String)>>),
+    Built(
+        Result<Box<AgentLoop>, String>,
+        Option<Vec<(String, String)>>,
+    ),
 }
 
 /// SFTP 双栏浏览 UI（本地 | 远程）。
@@ -1006,7 +1012,7 @@ impl eframe::App for GuiApp {
                 Ok(agent) => {
                     let tx = self.agent_tx.clone();
                     let rx = self.agent_rx.take().expect("AgentBridge 接收端已用");
-                    let mut bridge = AgentBridge::new(agent, tx, rx);
+                    let mut bridge = AgentBridge::new(*agent, tx, rx);
                     if let Some(msgs) = restore_msgs {
                         // 恢复历史：注入 LLM 上下文 + 面板显示
                         {
