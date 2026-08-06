@@ -413,9 +413,7 @@ fn write_askpass(alias: &str) -> anyhow::Result<std::path::PathBuf> {
     std::fs::create_dir_all(&dir)?;
     let path = dir.join(format!("askpass-{alias}.sh"));
     let self_exe = std::env::current_exe()?.display().to_string();
-    let script = format!(
-        "#!/bin/sh\nexec {self_exe} vault-get \"ssh-pw:{alias}\" 2>/dev/null\n"
-    );
+    let script = format!("#!/bin/sh\nexec {self_exe} vault-get \"ssh-pw:{alias}\" 2>/dev/null\n");
     std::fs::write(&path, script)?;
     #[cfg(unix)]
     {

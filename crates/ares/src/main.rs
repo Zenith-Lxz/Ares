@@ -38,9 +38,32 @@ fn main() -> Result<()> {
         Some(Command::Provider { action }) => cmd_provider(action),
         Some(Command::VaultGet { alias }) => {
             // SSH_ASKPASS 用途：stdout 直接输出 secret（无换行）
-            if let Some(s) = crate::vault::get_migrate(&alias) {
+            if let Some(s) = crate::vault::get(&alias) {
                 print!("{s}");
             }
+            Ok(())
+        }
+        Some(Command::VaultMigrate) => {
+            // 从 hosts.toml + providers.toml 收集 alias，一次性迁移 keychain → vault
+            use ares_core::config::HostsConfig;
+            use ares_llm::ProvidersConfig;
+            let mut aliases: Vec<String> = Vec::new();
+            if let Ok(h) = HostsConfig::load() {
+                for (k, e) in &h.hosts {
+                    if e.auth == "password" {
+                        aliases.push(format!("ssh-pw:{k}"));
+                    }
+                }
+            }
+            if let Ok(p) = ProvidersConfig::load() {
+                for e in p.providers.values() {
+                    if !e.keychain_account.is_empty() {
+                        aliases.push(e.keychain_account.clone());
+                    }
+                }
+            }
+            let n = crate::vault::migrate_from_keychain(&aliases).map_err(anyhow::Error::msg)?;
+            println!("✓ 已迁移 {n} 条凭据到本地 vault（之后不再弹系统授权）");
             Ok(())
         }
         // M1.5 形态调整（2026-08-05 用户拍板）：默认入口 = 简易 iTerm2 GUI
@@ -212,7 +235,7 @@ pub(crate) async fn build_agent(
 
     let providers = ProvidersConfig::load()?;
     let (name, entry) = providers.active_entry()?;
-    let api_key = crate::vault::get_migrate(&entry.keychain_account).with_context(|| {
+    let api_key = crate::vault::get(&entry.keychain_account).with_context(|| {
         format!(
             "vault 中没有 {}。请先运行：ares provider add {name}",
             entry.keychain_account

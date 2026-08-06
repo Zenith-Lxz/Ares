@@ -34,6 +34,9 @@ pub enum Command {
         /// vault alias（如 ssh-pw:测试）
         alias: String,
     },
+
+    /// 一次性迁移旧 Keychain 凭据 → 本地 vault（弹一次 mac 授权，之后零弹窗）
+    VaultMigrate,
 }
 
 #[derive(Subcommand)]

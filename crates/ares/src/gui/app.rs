@@ -251,6 +251,8 @@ pub struct GuiApp {
     /// 背景图纹理（已加载的路径）
     bg_texture: Option<egui::TextureHandle>,
     bg_loaded: Option<String>,
+    /// 等待输入密码的主机（auth=password 且 vault 无密码；输入后存 vault 再连接）
+    pending_password: Option<String>,
 }
 
 struct AgentBridge {
@@ -343,6 +345,7 @@ impl GuiApp {
             theme_msg: None,
             bg_texture: None,
             bg_loaded: None,
+            pending_password: None,
         };
         app.restore_layout();
         app
@@ -376,6 +379,14 @@ impl GuiApp {
         } else {
             entry.auth.as_str()
         };
+        // 密码主机：vault 无密码时先弹输入框（显示主机名:IP），存 vault 后再连接
+        if auth == "password"
+            && crate::vault::get(&format!("ssh-pw:{key}")).is_none()
+            && self.pending_password.is_none()
+        {
+            self.pending_password = Some(key.to_string());
+            return;
+        }
         match Session::open_with_auth(key, &target, 24, 80, repaint, auth) {
             Ok(s) => {
                 if let Some(dir) = dir {
@@ -1285,6 +1296,59 @@ impl eframe::App for GuiApp {
         // 处理输入（转发 / 快捷键）
         self.handle_input(ctx);
 
+        // 密码输入弹窗（auth=password 且 vault 无密码：显示主机名:IP，输入后存 vault 并连接）
+        if let Some(key) = self.pending_password.clone() {
+            let mut password = String::new();
+            let (hostname, port) = self
+                .hosts
+                .get(&key)
+                .map(|e| (e.hostname.clone(), e.port.unwrap_or(22)))
+                .unwrap_or_else(|| (key.clone(), 22));
+            let mut open = true;
+            let mut saved = false;
+            egui::Window::new("输入 SSH 密码")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.label(
+                        RichText::new(format!("{key}  ({hostname}:{port})"))
+                            .color(Color32::from_rgb(230, 190, 90)),
+                    );
+                    ui.label(
+                        RichText::new("密码将加密保存在本地 vault（~/.config/ares/vault.bin），不再弹系统授权。")
+                            .color(Color32::GRAY)
+                            .small(),
+                    );
+                    ui.add_space(4.0);
+                    let resp = ui.add(
+                        egui::TextEdit::singleline(&mut password)
+                            .password(true)
+                            .desired_width(280.0),
+                    );
+                    resp.request_focus();
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        let confirmed = ui.button("连接").clicked()
+                            || (resp.lost_focus()
+                                && ui.input(|i| i.key_pressed(egui::Key::Enter)));
+                        if confirmed && !password.trim().is_empty() {
+                            let _ = crate::vault::set(&format!("ssh-pw:{key}"), password.trim());
+                            saved = true;
+                        }
+                        if ui.button("取消").clicked() {
+                            open = false;
+                        }
+                    });
+                });
+            if saved {
+                self.pending_password = None;
+                self.open_tab(&key);
+            } else if !open {
+                self.pending_password = None;
+            }
+        }
+
         // Agent 事件统一轮询（rx 归 GuiApp：agent 未构建时也能收到
         // AgentBuilt —— 否则"正在启动"永远不结束）
         let mut outcome = None;
@@ -1479,6 +1543,16 @@ impl eframe::App for GuiApp {
                                     format!("{} ({}pane)", w.title(), w.sessions.len())
                                 } else {
                                     w.title().to_string()
+                                };
+                                // 主机名/IP 附加显示（确认连接目标）
+                                let hostinfo = self
+                                    .hosts
+                                    .get(w.title())
+                                    .map(|e| e.hostname.clone())
+                                    .filter(|h| !h.is_empty());
+                                let panes = match hostinfo {
+                                    Some(h) => format!("{panes} ({h})"),
+                                    None => panes,
                                 };
                                 let color = match st {
                                     "已断开" => Color32::from_rgb(220, 90, 90),

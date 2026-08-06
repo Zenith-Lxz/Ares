@@ -83,21 +83,26 @@ pub fn get(alias: &str) -> Option<String> {
         .map(|(_, s)| s)
 }
 
-/// 读取（含旧 keychain 迁移）：vault 未命中 → keychain → 自动写入 vault。
-pub fn get_migrate(alias: &str) -> Option<String> {
-    if let Some(s) = get(alias) {
-        return Some(s);
-    }
-    #[cfg(target_os = "macos")]
-    {
-        if let Ok(Some(s)) = ares_darwin::keychain::get_secret(alias) {
-            if !s.is_empty() {
-                let _ = set(alias, &s);
-                return Some(s);
+/// 显式一次性迁移：旧 keychain 条目 → vault（仅用户主动运行时弹一次 mac 授权）。
+/// aliases 由调用方从配置收集（hosts.toml 的 ssh-pw:<key> + providers.toml 的 llm:<name>）。
+/// 运行后 vault 命中，后续读取不再触碰 keychain（零弹窗）。
+pub fn migrate_from_keychain(aliases: &[String]) -> Result<usize, String> {
+    let mut migrated = 0usize;
+    for alias in aliases {
+        if get(alias).is_some() {
+            continue; // vault 已有，跳过
+        }
+        #[cfg(target_os = "macos")]
+        {
+            if let Ok(Some(s)) = ares_darwin::keychain::get_secret(alias) {
+                if !s.is_empty() {
+                    set(alias, &s)?;
+                    migrated += 1;
+                }
             }
         }
     }
-    None
+    Ok(migrated)
 }
 
 /// 写入/更新 alias → secret（原子写，600 权限）。

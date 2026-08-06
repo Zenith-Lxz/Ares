@@ -239,7 +239,7 @@ async fn connect_sftp(
     // 认证：密码主机走本地加密 vault（ssh-pw:<alias>），否则依次尝试默认私钥
     let mut authed = false;
     if auth == "password" {
-        match crate::vault::get_migrate(&format!("ssh-pw:{alias}")) {
+        match crate::vault::get(&format!("ssh-pw:{alias}")) {
             Some(pw) => {
                 if let Ok(res) = session.authenticate_password(user, pw).await {
                     authed = res.success();
