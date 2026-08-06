@@ -123,6 +123,10 @@ static CSI_RE: LazyLock<Regex> =
 /// - 剔除全部 C0/C1 控制字符与 ESC（`\x00-\x1f`、`\x7f`、`\u{80}-\u{9f}`）
 /// - 剔除不可见 / 双向控制 Unicode（U+200B–U+200F、U+202A–U+202E、U+2066–U+2069）
 /// - 折叠换行为空格，单行硬截断到 120 字符
+//
+// clippy::nonminimal_bool：下方布尔表达式按「每行一条剔除规则」组织（与
+// ares-core/display.rs 同款），等价简化会破坏注释对应关系；与业务无关，豁免。
+#[allow(clippy::nonminimal_bool)]
 fn sanitize_for_display(s: &str) -> String {
     // 1. 先剔除完整 CSI 序列（ESC [ 参数 最终字节）。只删 ESC 本身会留下
     //    `[2K` 这类残留文本，攻击者可用 `\x1b[2K` 擦行后残留肉眼可见的
