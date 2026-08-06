@@ -28,6 +28,8 @@ pub struct Session {
     pub exited: Arc<Mutex<bool>>,
     /// 已收到首笔远端数据（ssh 握手完成，连接中状态用）。
     pub connected: Arc<Mutex<bool>>,
+    /// 滚动回退偏移（行数；0=正常视图）。scrollback 容量 10000 行。
+    pub scroll: Arc<Mutex<usize>>,
 }
 
 impl Session {
@@ -121,8 +123,11 @@ impl Session {
         let writer = pair.master.take_writer()?;
 
         let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 0)));
+        // 滚动回退容量 10000 行（vt100 grid 维护，Parser::set_scrollback 公开）
+        parser.lock().unwrap().set_scrollback(10000);
         let exited = Arc::new(Mutex::new(false));
         let connected = Arc::new(Mutex::new(false));
+        let scroll = Arc::new(Mutex::new(0usize));
 
         // 读线程：pty 输出 → vt100 解析（每批数据后通知 GUI 重画）
         {
@@ -156,6 +161,7 @@ impl Session {
             connected,
             _child: Arc::new(Mutex::new(child)),
             exited,
+            scroll,
         })
     }
 
@@ -219,6 +225,38 @@ impl Session {
     /// 是否已收到首笔远端数据（连接中反馈用）。
     pub fn is_connected(&self) -> bool {
         *self.connected.lock().unwrap()
+    }
+
+    // ── 滚动回退（scrollback）──
+
+    /// 向上/向下滚动 delta 行（负=向下）；返回实际偏移（0=底部）。
+    pub fn scroll_lines(&self, delta: i32) -> usize {
+        let mut sc = self.scroll.lock().unwrap();
+        let target = if delta >= 0 {
+            sc.saturating_add(delta as usize)
+        } else {
+            sc.saturating_sub((-delta) as usize)
+        };
+        {
+            let mut p = self.parser.lock().unwrap();
+            p.set_scrollback(target);
+            // 读回实际偏移（vt100 内部 clamp 到 scrollback 长度）
+            *sc = p.screen().scrollback();
+        }
+        *sc
+    }
+
+    /// 当前滚动偏移（0=底部正常视图）。
+    pub fn scroll_offset(&self) -> usize {
+        *self.scroll.lock().unwrap()
+    }
+
+    /// 回到底部（新输出跟随）。
+    pub fn scroll_reset(&self) {
+        let mut sc = self.scroll.lock().unwrap();
+        *sc = 0;
+        let mut p = self.parser.lock().unwrap();
+        p.set_scrollback(0);
     }
 }
 

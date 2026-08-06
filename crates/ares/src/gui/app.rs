@@ -532,6 +532,18 @@ impl GuiApp {
         let mut enter_forwarded = false;
         for ev in events {
             match ev {
+                egui::Event::MouseWheel { delta, .. } => {
+                    // 终端区域滚轮 → 滚动回退（scrollback，M1）
+                    if !any_focus {
+                        if let Some(Tab::Term(ws)) = self.tabs.get(self.active) {
+                            let s = &ws.sessions[ws.active];
+                            let d = (delta.y * 3.0).round() as i32;
+                            if d != 0 {
+                                s.scroll_lines(d);
+                            }
+                        }
+                    }
+                }
                 egui::Event::Text(t) => {
                     if !any_focus {
                         if let Some(Tab::Term(w)) = self.tabs.get(self.active) {
@@ -607,6 +619,15 @@ impl GuiApp {
                     // 输入框聚焦时不转发；Enter 与 Text 事件去重）
                     if !any_focus {
                         if let Some(Tab::Term(w)) = self.tabs.get(self.active) {
+                            // End：滚动回到底部；Home：滚到顶部（scrollback，M1）
+                            if key == egui::Key::End {
+                                w.sessions[w.active].scroll_reset();
+                                continue;
+                            }
+                            if key == egui::Key::Home {
+                                w.sessions[w.active].scroll_lines(100_000);
+                                continue;
+                            }
                             if key == egui::Key::Enter {
                                 if enter_forwarded {
                                     continue; // Text("\r") 已转发
@@ -1211,6 +1232,16 @@ impl eframe::App for GuiApp {
                         }
                     } else {
                         ui.label(RichText::new("无会话").color(Color32::GRAY));
+                    }
+                    // 滚动位置（scrollback，M1）：非底部时显示已滚行数
+                    if let Some(Tab::Term(ws)) = self.tabs.get(self.active) {
+                        let off = ws.sessions[ws.active].scroll_offset();
+                        if off > 0 {
+                            ui.label(
+                                RichText::new(format!("↑{off} 行"))
+                                    .color(Color32::from_rgb(120, 140, 170)),
+                            );
+                        }
                     }
                     ui.separator();
                     ui.label(
