@@ -429,7 +429,7 @@ impl GpuTerminalRenderer {
         for s in &segs {
             match s.kind {
                 FontKind::Emoji => self.push_emoji(&mut out, s, cell_w, cell_h),
-                _ => self.push_shaped(&mut out, &s, cell_w, cell_h),
+                _ => self.push_shaped(&mut out, s, cell_w, cell_h),
             }
         }
         // 光标 beam/underline
@@ -526,10 +526,7 @@ impl GpuTerminalRenderer {
             };
             if let Some(bitmap) = scaler.scale_color_bitmap(gid, swash::scale::StrikeWith::BestFit)
             {
-                let (gw, gh) = (
-                    bitmap.placement.width as u32,
-                    bitmap.placement.height as u32,
-                );
+                let (gw, gh) = (bitmap.placement.width, bitmap.placement.height);
                 if gw > 0 && gh > 0 {
                     let rgba: Vec<u8> = bitmap
                         .data
