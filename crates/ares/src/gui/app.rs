@@ -985,10 +985,36 @@ fn term_mouse_interact(
         ws.drag_start = None;
     }
     if resp.clicked() && ws.drag_start.is_none() {
-        // 纯点击：清焦点 + 清选区
+        // 纯点击：先试超链接（M5），命中则不干扰选区
         ctx.memory_mut(|m| m.stop_text_input());
-        ws.selection = None;
+        let mut opened = false;
+        if let Some(p) = resp.interact_pointer_pos() {
+            let (r, c) = to_cell(p);
+            opened = open_url_at(ws, r, c);
+        }
+        if !opened {
+            ws.selection = None;
+        }
     }
+}
+
+/// 点击 cell 处的超链接：命中则用系统默认浏览器打开（macOS `open`）。
+fn open_url_at(ws: &TermWorkspace, r: u16, c: u16) -> bool {
+    let screen = ws.sessions[ws.active].screen();
+    let cols = screen.size().1;
+    let mut text = String::new();
+    for cc in 0..cols {
+        if let Some(cell) = screen.cell(r, cc) {
+            text.push_str(&cell.contents());
+        }
+    }
+    if let Some((s, e, url)) = crate::gui::term::find_url(&text) {
+        if c >= s as u16 && c <= e as u16 {
+            let _ = std::process::Command::new("open").arg(&url).spawn();
+            return true;
+        }
+    }
+    false
 }
 
 /// AgentBridge::poll 的返回：AgentBuilt 事件（GUI 层处理）。

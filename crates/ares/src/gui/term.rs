@@ -109,6 +109,37 @@ impl SelectRange {
     }
 }
 
+/// 在文本中查找第一个 URL（http/https/ftp），返回 (start, end, url)。
+pub fn find_url(text: &str) -> Option<(usize, usize, String)> {
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i + 7 <= bytes.len() {
+        let scheme = bytes[i..].starts_with(b"http://")
+            || bytes[i..].starts_with(b"https://")
+            || bytes[i..].starts_with(b"ftp://");
+        if scheme {
+            let mut j = i + 7;
+            while j < bytes.len() {
+                let b = bytes[j];
+                if b.is_ascii_whitespace()
+                    || b == b'"'
+                    || b == b'\''
+                    || b == b'<'
+                    || b == b'>'
+                    || b == b')'
+                    || b == b']'
+                {
+                    break;
+                }
+                j += 1;
+            }
+            return Some((i, j - 1, text[i..j].to_string()));
+        }
+        i += 1;
+    }
+    None
+}
+
 pub fn draw_terminal(
     ui: &mut egui::Ui,
     screen: &vt100::Screen,
@@ -259,13 +290,29 @@ fn draw_row(
         }
     }
     for (start_col, text, fg) in segments {
-        painter.text(
-            pos2(lay.origin.x + start_col as f32 * lay.cell_w, base_y),
-            Align2::LEFT_TOP,
-            text,
-            lay.font.clone(),
-            fg,
-        );
+        let pos = pos2(lay.origin.x + start_col as f32 * lay.cell_w, base_y);
+        // 超链接（M5）：URL 段下划线 + 链接色；点击在 app 层处理
+        if let Some((s, e, _)) = find_url(&text) {
+            let link_col = Color32::from_rgb(80, 160, 255);
+            let mut job = egui::text::LayoutJob::default();
+            let fmt = |color: Color32, underline: bool| egui::text::TextFormat {
+                font_id: lay.font.clone(),
+                color,
+                underline: underline.then(|| egui::Stroke::new(1.0, link_col)),
+                ..Default::default()
+            };
+            if s > 0 {
+                job.append(&text[..s], 0.0, fmt(fg, false));
+            }
+            job.append(&text[s..=e], 0.0, fmt(link_col, true));
+            if e + 1 < text.len() {
+                job.append(&text[e + 1..], 0.0, fmt(fg, false));
+            }
+            let galley = painter.layout_job(job);
+            painter.galley(pos, galley, fg);
+        } else {
+            painter.text(pos, Align2::LEFT_TOP, text, lay.font.clone(), fg);
+        }
     }
 }
 
