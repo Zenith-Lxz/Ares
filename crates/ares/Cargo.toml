@@ -9,6 +9,11 @@ license.workspace = true
 name = "ares"
 path = "src/main.rs"
 
+# Tauri 迁移（Phase 1）：commands 薄层仅在 tauri feature 下编译，
+# 主仓库 egui 版（默认构建）不链接 tauri。
+[features]
+tauri = ["dep:tauri"]
+
 [dependencies]
 ares-core.workspace = true
 ares-darwin.workspace = true
@@ -53,6 +58,7 @@ egui-wgpu = "0.30"
 aes-gcm = "0.10.3"
 sha2 = "0.10.9"
 unicode-width = "=0.2.0"
+tauri = { version = "2", features = ["macos-private-api"], optional = true }
 
 [dev-dependencies]
 tempfile = "3"
