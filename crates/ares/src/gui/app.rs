@@ -181,8 +181,8 @@ pub struct GuiApp {
     agent_starting: bool,
     /// Agent 构建/事件通道（GuiApp 持有，与 AgentBridge 共用）。
     agent_tx: Sender<AgentEvent>,
-    /// AgentBridge 的事件接收端（重建 bridge 时 take）。
-    agent_rx: Option<Receiver<AgentEvent>>,
+    /// Agent 事件统一接收端（永远归 GuiApp 持有，Agent 重建不丢失事件）。
+    agent_rx: Receiver<AgentEvent>,
     /// Agent 构建失败信息（面板显示 + 配置入口）。
     agent_error: Option<String>,
     /// 对话历史弹窗 + 恢复（a4 对话持久化）。
@@ -226,7 +226,6 @@ struct AgentBridge {
     input: String,
     busy: bool,
     tx: Sender<AgentEvent>,
-    rx: Receiver<AgentEvent>,
     /// 实时进度（AgentLoop 共享状态，不经主体锁）
     progress: Arc<std::sync::Mutex<Option<String>>>,
     cancel: Arc<std::sync::atomic::AtomicBool>,
@@ -278,7 +277,7 @@ impl GuiApp {
             agent_starting: false,
             agent_error: None,
             agent_tx,
-            agent_rx: Some(agent_rx),
+            agent_rx,
             add_modal: false,
             add_fields: AddHostFields::default(),
             import_modal: false,
@@ -688,7 +687,7 @@ impl GuiApp {
 }
 
 impl AgentBridge {
-    fn new(agent: AgentLoop, tx: Sender<AgentEvent>, rx: Receiver<AgentEvent>) -> Self {
+    fn new(agent: AgentLoop, tx: Sender<AgentEvent>) -> Self {
         let agent = Arc::new(tokio::sync::Mutex::new(agent));
         // 刚构造无人持锁：直接提取共享状态
         let (progress, cancel) = {
@@ -704,7 +703,6 @@ impl AgentBridge {
             input: String::new(),
             busy: false,
             tx,
-            rx,
             progress,
             cancel,
             progress_text: None,
@@ -835,56 +833,49 @@ impl AgentBridge {
         }
     }
 
-    /// 每帧收取完成的任务 + 刷新实时进度。
-    /// 轮询 agent 事件；AgentBuilt 事件返回 outcome 供 GUI 层处理。
-    fn poll(&mut self) -> Option<PollOutcome> {
+    /// 处理单个 Agent 事件（由 GuiApp 从统一 rx 分发；AgentBuilt 返回 outcome）。
+    fn on_event(&mut self, ev: AgentEvent) -> Option<PollOutcome> {
         self.progress_text = self.progress.try_lock().ok().and_then(|p| p.clone());
-        let mut built: Option<PollOutcome> = None;
-        while let Ok(ev) = self.rx.try_recv() {
-            match ev {
-                AgentEvent::Turn(Ok(r)) => {
-                    let mut body = r.reply.clone();
-                    // 工具执行记录只保留一行精简摘要（完整输出在终端可见，
-                    // 不在面板里重复 —— 2026-08-05 用户反馈「回答太乱」）
-                    for run in &r.tool_runs {
-                        let cmd = run.command.clone().unwrap_or_default();
-                        let short: String = cmd.chars().take(60).collect();
-                        let cmd_txt = if cmd.chars().count() > 60 {
-                            format!("{short}…")
+        match ev {
+            AgentEvent::Turn(Ok(r)) => {
+                let mut body = r.reply.clone();
+                // 工具执行记录只保留一行精简摘要（完整输出在终端可见，
+                // 不在面板里重复 —— 2026-08-05 用户反馈「回答太乱」）
+                for run in &r.tool_runs {
+                    let cmd = run.command.clone().unwrap_or_default();
+                    let short: String = cmd.chars().take(60).collect();
+                    let cmd_txt = if cmd.chars().count() > 60 {
+                        format!("{short}…")
+                    } else {
+                        cmd
+                    };
+                    body = format!(
+                        "\n{body}\n· [{}] {}{}",
+                        run.decision_label,
+                        run.tool,
+                        if cmd_txt.is_empty() {
+                            String::new()
                         } else {
-                            cmd
-                        };
-                        body = format!(
-                            "\n{body}\n· [{}] {}{}",
-                            run.decision_label,
-                            run.tool,
-                            if cmd_txt.is_empty() {
-                                String::new()
-                            } else {
-                                format!(" {cmd_txt}")
-                            }
-                        );
-                    }
-                    self.messages.push(("assistant".into(), body));
+                            format!(" {cmd_txt}")
+                        }
+                    );
                 }
-                AgentEvent::Turn(Err(e)) => {
-                    self.messages
-                        .push(("assistant".into(), format!("错误：{e}")));
-                }
-                AgentEvent::Reflection(summary) => {
-                    self.messages
-                        .push(("system".into(), format!("🧠 {summary}")));
-                }
-                AgentEvent::AgentBuilt(result, restore_msgs) => {
-                    built = Some(PollOutcome::Built(result, restore_msgs));
-                }
+                self.messages.push(("assistant".into(), body));
             }
-            if let Some(b) = built {
-                return Some(b);
+            AgentEvent::Turn(Err(e)) => {
+                self.messages
+                    .push(("assistant".into(), format!("错误：{e}")));
             }
-            self.save_session();
-            self.busy = false;
+            AgentEvent::Reflection(summary) => {
+                self.messages
+                    .push(("system".into(), format!("🧠 {summary}")));
+            }
+            AgentEvent::AgentBuilt(result, restore_msgs) => {
+                return Some(PollOutcome::Built(result, restore_msgs));
+            }
         }
+        self.save_session();
+        self.busy = false;
         None
     }
 }
@@ -1001,18 +992,27 @@ impl eframe::App for GuiApp {
         // 处理输入（转发 / 快捷键）
         self.handle_input(ctx);
 
-        // Agent 面板任务轮询（AgentBuilt 事件在此处理：赋值 self.agent）
+        // Agent 事件统一轮询（rx 归 GuiApp：agent 未构建时也能收到
+        // AgentBuilt —— 否则"正在启动"永远不结束）
         let mut outcome = None;
-        if let Some(a) = &mut self.agent {
-            outcome = a.poll();
+        while let Ok(ev) = self.agent_rx.try_recv() {
+            match ev {
+                AgentEvent::AgentBuilt(result, msgs) => {
+                    outcome = Some(PollOutcome::Built(result, msgs));
+                }
+                other => {
+                    if let Some(a) = &mut self.agent {
+                        outcome = a.on_event(other);
+                    }
+                }
+            }
         }
         if let Some(PollOutcome::Built(result, restore_msgs)) = outcome {
             self.agent_starting = false;
             match result {
                 Ok(agent) => {
                     let tx = self.agent_tx.clone();
-                    let rx = self.agent_rx.take().expect("AgentBridge 接收端已用");
-                    let mut bridge = AgentBridge::new(*agent, tx, rx);
+                    let mut bridge = AgentBridge::new(*agent, tx);
                     if let Some(msgs) = restore_msgs {
                         // 恢复历史：注入 LLM 上下文 + 面板显示
                         {
@@ -1475,7 +1475,9 @@ impl eframe::App for GuiApp {
                         }
                         let mut send_clicked = false;
                         if a.busy {
-                            if let Some(p) = &a.progress_text {
+                            // 实时进度：直接读共享状态（不依赖事件驱动的缓存）
+                            let cur_progress = a.progress.try_lock().ok().and_then(|p| p.clone());
+                            if let Some(p) = &cur_progress {
                                 ui.label(
                                     RichText::new(format!("⏳ {p}"))
                                         .color(Color32::from_rgb(179, 146, 74)),
