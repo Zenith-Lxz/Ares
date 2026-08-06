@@ -164,15 +164,25 @@ impl Session {
                         Ok(0) | Err(_) => break,
                         Ok(n) => {
                             *connected.lock().unwrap() = true;
-                            // Kitty 图形协议解析（M6）：_G params;base64 \
+                            // 裸 LF → CRLF（vt100 的 \n 是 LF-only（列保留），主流终端
+                            // newline 语义 = 换行+回车；ssh raw pty 不转 ONLCR）
+                            let mut cooked = [0u8; 16384];
+                            let mut clen = 0usize;
+                            for i in 0..n {
+                                if buf[i] == b'\n' && (i == 0 || buf[i - 1] != b'\r') {
+                                    cooked[clen] = b'\r';
+                                    clen += 1;
+                                }
+                                cooked[clen] = buf[i];
+                                clen += 1;
+                            }
+                            parser.lock().unwrap().process(&cooked[..clen]);
+                            // Kitty 图形协议解析（M6）：
                             // （vt100 忽略未知 OSC，解析独立于渲染管线）
                             parse_kitty_images(&buf[..n], &parser, &images_r, &mut kitty_b64);
                             // xterm 鼠标模式 / 括号粘贴 / 铃声（主流终端能力补齐）
                             scan_terminal_modes(&buf[..n], &mouse_mode_r, &bracketed_paste_r);
                             scan_bell(&buf[..n]);
-                            if let Ok(mut p) = parser.lock() {
-                                p.process(&buf[..n]);
-                            }
                             {
                                 let mut last = last_repaint.lock().unwrap();
                                 if last.elapsed() >= std::time::Duration::from_millis(33) {

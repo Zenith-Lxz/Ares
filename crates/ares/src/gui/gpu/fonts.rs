@@ -36,23 +36,34 @@ impl FontSet {
         let fira = Face::from_slice(FIRA_CODE, 0).expect("Fira Code 内嵌字体损坏");
         let fira_swash = FontRef::from_index(FIRA_CODE, 0).expect("Fira Code swash 加载失败");
         // 系统字体数据 leak 到 'static（进程生命周期内有效，~10-20MB）
-        let cjk = load_system_fonts(&[
-            "PingFang SC",
-            "Microsoft YaHei",
-            "Noto Sans CJK SC",
-            "WenQuanYi Micro Hei",
-        ])
+        // font-kit 拿不到时直接读系统字体文件兜底（macOS 路径）
+        let cjk = load_system_fonts(
+            &[
+                "PingFang SC",
+                "Microsoft YaHei",
+                "Noto Sans CJK SC",
+                "WenQuanYi Micro Hei",
+            ],
+            &[
+                "/System/Library/Fonts/PingFang.ttc",
+                "/System/Library/Fonts/STHeiti Light.ttc",
+                "/System/Library/Fonts/Hiragino Sans GB.ttc",
+                "/System/Library/Fonts/Supplemental/Songti.ttc",
+            ],
+        )
         .map(|data| {
             let data: &'static [u8] = Box::leak(data.into_boxed_slice());
             (Face::from_slice(data, 0), FontRef::from_index(data, 0))
         });
         let (cjk, cjk_swash) = cjk.unwrap_or((None, None));
-        let emoji_swash =
-            load_system_fonts(&["Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji"])
-                .and_then(|data| {
-                    let data: &'static [u8] = Box::leak(data.into_boxed_slice());
-                    FontRef::from_index(data, 0)
-                });
+        let emoji_swash = load_system_fonts(
+            &["Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji"],
+            &["/System/Library/Fonts/Apple Color Emoji.ttc"],
+        )
+        .and_then(|data| {
+            let data: &'static [u8] = Box::leak(data.into_boxed_slice());
+            FontRef::from_index(data, 0)
+        });
         Self {
             fira,
             fira_swash,
@@ -127,16 +138,23 @@ impl FontSet {
     }
 }
 
-/// 从系统字体源加载第一个匹配家族的字体字节。
-fn load_system_fonts(families: &[&str]) -> Option<Vec<u8>> {
+/// 从系统字体源加载字体字节：先 font-kit 家族查询，失败直接读系统字体文件。
+fn load_system_fonts(families: &[&str], file_fallbacks: &[&str]) -> Option<Vec<u8>> {
     let source = font_kit::source::SystemSource::new();
     for fam in families {
         if let Ok(family) = source.select_family_by_name(fam) {
             for handle in family.fonts() {
                 if let Ok(data) = handle.load() {
-                    return Some(data.copy_font_data()?.to_vec());
+                    if let Some(bytes) = data.copy_font_data() {
+                        return Some(bytes.to_vec());
+                    }
                 }
             }
+        }
+    }
+    for path in file_fallbacks {
+        if let Ok(bytes) = std::fs::read(path) {
+            return Some(bytes);
         }
     }
     None
