@@ -625,7 +625,7 @@ fn raster_glyph(
     let mut scaler = ctx.builder(*font).size(px).build();
     let render = swash::scale::Render::new(&[swash::scale::Source::Outline]);
     let image = render.render(&mut scaler, glyph_id)?;
-    let (w, h) = (image.placement.width as u32, image.placement.height as u32);
+    let (w, h) = (image.placement.width, image.placement.height);
     if w == 0 || h == 0 {
         return None;
     }
@@ -646,7 +646,7 @@ fn push_quad(
     scale: f32,
 ) {
     // 逻辑像素 → 物理像素 → NDC
-    let x0 = (g.x + (rect.min.x - rect.min.x)) * scale; // 相对区域原点
+    let x0 = g.x * scale; // 相对区域原点（逻辑 → 物理）
     let y0 = g.y * scale;
     let w = g.w * scale;
     let h = g.h * scale;
