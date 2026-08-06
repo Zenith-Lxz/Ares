@@ -1767,18 +1767,16 @@ impl eframe::App for GuiApp {
                     ui.separator();
                     ui.horizontal(|ui| {
                         let connect = ui.button("连接").clicked();
-                        if connect
-                            && self.filter_selected.is_some()
-                            && self.filter_selected.unwrap() < vis.len()
-                        {
-                            connect_key = Some(vis[self.filter_selected.unwrap()].1.clone());
+                        if let Some(sel) = self.filter_selected {
+                            if connect && sel < vis.len() {
+                                connect_key = Some(vis[sel].1.clone());
+                            }
                         }
                         let sftp = ui.button("SFTP 浏览").clicked();
-                        if sftp
-                            && self.filter_selected.is_some()
-                            && self.filter_selected.unwrap() < vis.len()
-                        {
-                            sftp_key = Some(vis[self.filter_selected.unwrap()].1.clone());
+                        if let Some(sel) = self.filter_selected {
+                            if sftp && sel < vis.len() {
+                                sftp_key = Some(vis[sel].1.clone());
+                            }
                         }
                     });
                     if open_add {
