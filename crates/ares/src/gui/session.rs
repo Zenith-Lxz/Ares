@@ -32,6 +32,10 @@ pub struct Session {
     pub scroll: Arc<Mutex<usize>>,
     /// Kitty 图形协议内联图片（M6）：按接收完成时的光标位置放置。
     pub images: Arc<Mutex<Vec<InlineImage>>>,
+    /// xterm 鼠标协议模式（0=关；1000=点击；1002=拖拽；1003=全跟踪）。
+    pub mouse_mode: Arc<Mutex<u8>>,
+    /// 括号粘贴（bracketed paste：\x1b[?2004h 开启）—— Cmd+V 时包裹。
+    pub bracketed_paste: Arc<Mutex<bool>>,
 }
 
 /// Kitty 协议内联图片（渲染时解码）。
@@ -138,6 +142,8 @@ impl Session {
         let connected = Arc::new(Mutex::new(false));
         let scroll = Arc::new(Mutex::new(0usize));
         let images = Arc::new(Mutex::new(Vec::<InlineImage>::new()));
+        let mouse_mode = Arc::new(Mutex::new(0u8));
+        let bracketed_paste = Arc::new(Mutex::new(false));
 
         // 读线程：pty 输出 → vt100 解析（每批数据后通知 GUI 重画）
         // repaint 节流 30fps：高频输出（top/日志）不触发每批重画（M4）
@@ -146,6 +152,8 @@ impl Session {
         {
             let last_repaint = last_repaint.clone();
             let images_r = images.clone();
+            let mouse_mode_r = mouse_mode.clone();
+            let bracketed_paste_r = bracketed_paste.clone();
             let parser = Arc::clone(&parser);
             let exited = Arc::clone(&exited);
             let connected = Arc::clone(&connected);
@@ -159,6 +167,9 @@ impl Session {
                             // Kitty 图形协议解析（M6）：_G params;base64 \
                             // （vt100 忽略未知 OSC，解析独立于渲染管线）
                             parse_kitty_images(&buf[..n], &parser, &images_r, &mut kitty_b64);
+                            // xterm 鼠标模式 / 括号粘贴 / 铃声（主流终端能力补齐）
+                            scan_terminal_modes(&buf[..n], &mouse_mode_r, &bracketed_paste_r);
+                            scan_bell(&buf[..n]);
                             if let Ok(mut p) = parser.lock() {
                                 p.process(&buf[..n]);
                             }
@@ -187,6 +198,8 @@ impl Session {
             exited,
             scroll,
             images,
+            mouse_mode,
+            bracketed_paste,
         })
     }
 
@@ -282,6 +295,52 @@ impl Session {
         *sc = 0;
         let mut p = self.parser.lock().unwrap();
         p.set_scrollback(0);
+    }
+}
+
+/// 扫描 xterm 鼠标模式（\x1b[?1000/1002/1003h/l）与括号粘贴（\x1b[?2004h/l）。
+fn scan_terminal_modes(
+    buf: &[u8],
+    mouse_mode: &Arc<Mutex<u8>>,
+    bracketed_paste: &Arc<Mutex<bool>>,
+) {
+    let mut i = 0usize;
+    while i + 3 < buf.len() {
+        if buf[i] == 0x1b && buf[i + 1] == b'[' && buf[i + 2] == b'?' {
+            // 读数字
+            let mut j = i + 3;
+            let mut n = 0u32;
+            while j < buf.len() && buf[j].is_ascii_digit() {
+                n = n * 10 + (buf[j] - b'0') as u32;
+                j += 1;
+            }
+            if j < buf.len() && (buf[j] == b'h' || buf[j] == b'l') {
+                let on = buf[j] == b'h';
+                match n {
+                    1000 | 1002 | 1003 => {
+                        let mut m = mouse_mode.lock().unwrap();
+                        *m = if on { n as u8 } else { 0 };
+                    }
+                    2004 => {
+                        let mut b = bracketed_paste.lock().unwrap();
+                        *b = on;
+                    }
+                    _ => {}
+                }
+                i = j + 1;
+                continue;
+            }
+        }
+        i += 1;
+    }
+}
+
+/// 铃声（BEL 0x07）：播放 macOS 系统提示音（Tink）。
+fn scan_bell(buf: &[u8]) {
+    if buf.contains(&0x07) {
+        let _ = std::process::Command::new("afplay")
+            .arg("/System/Library/Sounds/Tink.aiff")
+            .spawn();
     }
 }
 

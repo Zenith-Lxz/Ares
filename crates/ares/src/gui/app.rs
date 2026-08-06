@@ -616,17 +616,57 @@ impl GuiApp {
         for ev in events {
             match ev {
                 egui::Event::MouseWheel { delta, .. } => {
-                    // 终端区域滚轮 → 滚动回退（scrollback，M1）
+                    // 终端区域滚轮：鼠标模式开启时转发终端（vim/tmux），否则 scrollback
                     if !any_focus {
                         if let Some(Tab::Term(ws)) = self.tabs.get_mut(self.active) {
                             let s = &ws.sessions[ws.active];
                             let d = (delta.y * 3.0).round() as i32;
-                            if d != 0 {
+                            let mouse_on = {
+                                let m = s.mouse_mode.lock().unwrap();
+                                *m > 0
+                            };
+                            if mouse_on {
+                                // 向上=64 向下=65（X10 wheel 编码）
+                                let btn = if d > 0 { 64u8 } else { 65u8 };
+                                let (rows, cols) = {
+                                    let sc = s.screen();
+                                    sc.size()
+                                };
+                                let mut out = vec![
+                                    0x1b,
+                                    b'M',
+                                    32 + btn,
+                                    32 + (cols / 2).min(222) as u8,
+                                    32 + (rows / 2).min(222) as u8,
+                                ];
+                                s.write(&out);
+                            } else if d != 0 {
                                 s.scroll_lines(d);
                                 // 滚动后选区坐标失效：清除
                                 ws.selection = None;
                                 ws.drag_start = None;
                             }
+                        }
+                    }
+                }
+                egui::Event::Paste(text) => {
+                    // Cmd+V 粘贴（主流终端能力：bracketed paste 包裹）
+                    if !any_focus {
+                        if let Some(Tab::Term(w)) = self.tabs.get(self.active) {
+                            let s = &w.sessions[w.active];
+                            let bp = {
+                                let b = s.bracketed_paste.lock().unwrap();
+                                *b
+                            };
+                            let mut bytes = Vec::new();
+                            if bp {
+                                bytes.extend_from_slice(b"\x1b[200~");
+                            }
+                            bytes.extend_from_slice(text.as_bytes());
+                            if bp {
+                                bytes.extend_from_slice(b"\x1b[201~");
+                            }
+                            s.write(&bytes);
                         }
                     }
                 }
@@ -638,6 +678,10 @@ impl GuiApp {
                                     continue; // Key(Enter) 已转发
                                 }
                                 enter_forwarded = true;
+                            }
+                            // Alt+字符 → ESC 前缀（Meta 键，终端标准行为）
+                            if ctx.input(|i| i.modifiers.alt) {
+                                w.sessions[w.active].write(&[0x1b]);
                             }
                             w.sessions[w.active].write(t.as_bytes());
                         }
@@ -1026,19 +1070,39 @@ fn term_mouse_interact(
             .clamp(0.0, (rows - 1) as f32) as u16;
         (r, c)
     };
+    // xterm 鼠标协议（vim/tmux：鼠标模式开启时转发事件，不进 scrollback/选区）
+    let mouse_on = {
+        let m = ws.sessions[ws.active].mouse_mode.lock().unwrap();
+        *m > 0
+    };
     if resp.drag_started() {
         if let Some(p) = resp.interact_pointer_pos() {
             let (r, c) = to_cell(p);
-            ws.drag_start = Some((r, c));
-            ws.selection = Some(crate::gui::term::SelectRange::normalized(r, c, r, c));
+            if mouse_on {
+                mouse_send(ws, 0, c, r, true);
+            } else {
+                ws.drag_start = Some((r, c));
+                ws.selection = Some(crate::gui::term::SelectRange::normalized(r, c, r, c));
+            }
         }
     } else if resp.dragged() {
         if let (Some((r0, c0)), Some(p)) = (ws.drag_start, resp.interact_pointer_pos()) {
             let (r1, c1) = to_cell(p);
             ws.selection = Some(crate::gui::term::SelectRange::normalized(r0, c0, r1, c1));
+        } else if mouse_on {
+            if let Some(p) = resp.interact_pointer_pos() {
+                let (r, c) = to_cell(p);
+                mouse_send(ws, 0, c, r, false);
+            }
         }
     } else if resp.drag_stopped() {
         ws.drag_start = None;
+        if mouse_on {
+            if let Some(p) = resp.interact_pointer_pos() {
+                let (r, c) = to_cell(p);
+                mouse_send(ws, 3, c, r, false);
+            }
+        }
     }
     if resp.clicked() && ws.drag_start.is_none() {
         // 纯点击：先试超链接（M5），命中则不干扰选区
@@ -1051,6 +1115,23 @@ fn term_mouse_interact(
         if !opened {
             ws.selection = None;
         }
+    }
+}
+
+/// xterm 鼠标协议编码发送（X10：\x1b[M{btn+32}{col+33}{row+33}）。
+fn mouse_send(ws: &TermWorkspace, btn: u8, col: u16, row: u16, _press: bool) {
+    if col >= 223 || row >= 223 {
+        return; // X10 编码上限
+    }
+    let mut out = vec![
+        0x1b,
+        b'M',
+        32 + btn,
+        32 + (col + 1) as u8,
+        32 + (row + 1) as u8,
+    ];
+    if let Some(s) = ws.sessions.get(ws.active) {
+        s.write(&out);
     }
 }
 
@@ -1412,6 +1493,16 @@ impl eframe::App for GuiApp {
                         }
                     } else {
                         ui.label(RichText::new("无会话").color(Color32::GRAY));
+                    }
+                    // 远程标题（OSC 0/2 → vt100 title；iTerm2 行为：tab 显示远程标题）
+                    if let Some(Tab::Term(ws)) = self.tabs.get(self.active) {
+                        let title = ws.sessions[ws.active].screen().title().to_string();
+                        if !title.is_empty() {
+                            ui.label(
+                                RichText::new(format!(" · {title}"))
+                                    .color(Color32::from_rgb(140, 140, 150)),
+                            );
+                        }
                     }
                     // 滚动位置（scrollback，M1）：非底部时显示已滚行数
                     if let Some(Tab::Term(ws)) = self.tabs.get(self.active) {
