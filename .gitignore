@@ -33,3 +33,6 @@ skills-lock.json
 # ── 设计文档（不上公开仓库，仅本地）──────────────
 docs/
 README.md
+
+# ── Phase 0 Spike（验证产物，不入库）──────────────
+spike/

@@ -14,6 +14,10 @@ static CSI_RE: LazyLock<Regex> =
 /// - 剔除全部 C0/C1 控制字符与 ESC（`\x00-\x1f`、`\x7f`、`\u{80}-\u{9f}`）
 /// - 剔除不可见 / 双向控制 Unicode（U+200B–U+200F、U+202A–U+202E、U+2066–U+2069）
 /// - 折叠换行为空格，单行硬截断到 120 字符
+//
+// clippy::nonminimal_bool：下方布尔表达式刻意按「注释逐段」组织（每段对应一条
+// 剔除规则），clippy 建议的等价简化会破坏注释对应关系；与业务无关，豁免。
+#[allow(clippy::nonminimal_bool)]
 pub fn sanitize(s: &str) -> String {
     let no_csi = CSI_RE.replace_all(s, "");
     let cleaned: String = no_csi

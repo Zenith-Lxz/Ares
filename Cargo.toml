@@ -10,6 +10,7 @@ members = [
     "crates/ares-agent",
     "crates/ares-llm",
     "crates/ares",
+    "src-tauri",
 ]
 
 [workspace.package]
