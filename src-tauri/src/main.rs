@@ -17,6 +17,15 @@ fn main() {
         }
         std::process::exit(1);
     }
+    if args.get(1).map(String::as_str) == Some("vault-set") {
+        if let (Some(alias), Some(secret)) = (args.get(2), args.get(3)) {
+            if ares::vault::set(alias, secret).is_ok() {
+                return;
+            }
+        }
+        eprintln!("usage: ares-tauri vault-set <alias> <secret>");
+        std::process::exit(1);
+    }
     tauri::Builder::default()
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
