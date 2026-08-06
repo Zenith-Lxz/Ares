@@ -130,7 +130,10 @@ impl Session {
         let scroll = Arc::new(Mutex::new(0usize));
 
         // 读线程：pty 输出 → vt100 解析（每批数据后通知 GUI 重画）
+        // repaint 节流 30fps：高频输出（top/日志）不触发每批重画（M4）
+        let last_repaint = Arc::new(Mutex::new(std::time::Instant::now()));
         {
+            let last_repaint = last_repaint.clone();
             let parser = Arc::clone(&parser);
             let exited = Arc::clone(&exited);
             let connected = Arc::clone(&connected);
@@ -144,7 +147,13 @@ impl Session {
                             if let Ok(mut p) = parser.lock() {
                                 p.process(&buf[..n]);
                             }
-                            repaint();
+                            {
+                                let mut last = last_repaint.lock().unwrap();
+                                if last.elapsed() >= std::time::Duration::from_millis(33) {
+                                    *last = std::time::Instant::now();
+                                    repaint();
+                                }
+                            }
                         }
                     }
                 }

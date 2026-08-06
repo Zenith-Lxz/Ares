@@ -210,19 +210,6 @@ fn draw_row(
     selection: Option<&SelectRange>,
 ) {
     let base_y = lay.origin.y + r as f32 * lay.cell_h;
-    // 整行空（无内容、无背景）快速跳过 —— 终端大部分行是空的
-    let mut has_any = false;
-    for c in 0..cols {
-        if let Some(cell) = screen.cell(r, c) {
-            if !cell.contents().is_empty() || cell.bgcolor() != vt100::Color::Default {
-                has_any = true;
-                break;
-            }
-        }
-    }
-    if !has_any {
-        return;
-    }
     // 段：(起始列, 文本, 前景色)
     let mut segments: Vec<(u16, String, Color32)> = Vec::new();
     for c in 0..cols {
