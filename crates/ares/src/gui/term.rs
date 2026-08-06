@@ -140,6 +140,7 @@ pub fn find_url(text: &str) -> Option<(usize, usize, String)> {
     None
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn draw_terminal(
     ui: &mut egui::Ui,
     screen: &vt100::Screen,
@@ -291,7 +292,7 @@ fn draw_row(
     // 段：(起始列, 文本, 前景色)
     let mut segments: Vec<(u16, String, Color32)> = Vec::new();
     for c in 0..cols {
-        if blocked.get(r as usize).map_or(false, |s| s.contains(&c)) {
+        if blocked[r as usize].contains(&c) {
             continue; // 图片遮挡区（M6）
         }
         let Some(cell) = screen.cell(r, c) else {
