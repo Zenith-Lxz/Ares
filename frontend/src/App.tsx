@@ -1,106 +1,184 @@
-//! Phase 1 临时调试页：遍历 invoke 全部 command，验证前后端签名对齐。
-//! Phase 2 起替换为真实布局（终端区 + Agent 侧栏 + 状态栏）。
+//! Phase 2 根视图：终端 + 会话控制 + 密码弹窗。
+//! 终端内容不进 React state（坑 #7）—— 句柄存 ref。
 
-import { useEffect, useState } from 'react';
-import { Channel } from '@tauri-apps/api/core';
-import * as ipc from './ipc/commands';
+import { useEffect, useRef, useState } from 'react';
+import { createTerminal, type TermHandle } from './terminal/TerminalManager';
+import { sessionClose, sessionCreate, sessionProvidePassword } from './ipc/commands';
 
-interface ProbeRow {
-  name: string;
-  status: 'ok' | 'fail';
-  detail: string;
-}
+const SSH_ALIAS = '测试'; // hosts.toml 键（10.8.8.34）
 
 export default function App() {
-  const [rows, setRows] = useState<ProbeRow[]>([]);
-  const [running, setRunning] = useState(false);
+  const [status, setStatus] = useState('未连接');
+  // 诊断：捕获 webview 内未处理 JS 错误
+  useEffect(() => {
+    const h = (e: ErrorEvent) => setLog((prev) => [...prev.slice(-20), `JS ERROR: ${e.message}`]);
+    window.addEventListener('error', h);
+    return () => window.removeEventListener('error', h);
+  }, []);
+  const [log, setLog] = useState<string[]>([]);
+  const [needPwdAlias, setNeedPwdAlias] = useState<string | null>(null);
+  const [pwd, setPwd] = useState('');
 
-  const run = async () => {
-    setRunning(true);
-    const out: ProbeRow[] = [];
+  const containerRef = useRef<HTMLDivElement>(null);
+  const handleRef = useRef<TermHandle | null>(null);
 
-    const probe = async (name: string, fn: () => Promise<unknown>) => {
-      try {
-        const r = await fn();
-        out.push({ name, status: 'ok', detail: JSON.stringify(r).slice(0, 120) });
-      } catch (e) {
-        out.push({ name, status: 'fail', detail: String(e).slice(0, 120) });
-      }
-    };
+  const addLog = (m: string) => setLog((prev) => [...prev.slice(-20), m]);
 
-    await probe('session_create', () => ipc.sessionCreate(null, 100, 30));
-    await probe('session_subscribe', () =>
-      ipc.sessionSubscribe(1, new Channel<ipc.PtyChunk>()),
-    );
-    await probe('session_write', () => ipc.sessionWrite(1, 'll\n'));
-    await probe('session_resize', () => ipc.sessionResize(1, 100, 30));
-    await probe('session_close', () => ipc.sessionClose(1));
-    await probe('session_list', () => ipc.sessionList());
-    await probe('command_check', () => ipc.commandCheck(1, 'rm -rf /'));
-    await probe('command_authorize', () => ipc.commandAuthorize(1, 'rm -rf /'));
-    await probe('host_list', () => ipc.hostList());
-    await probe('host_get', () => ipc.hostGet('测试'));
-    await probe('host_probe', () => ipc.hostProbe(['测试']));
-    await probe('agent_subscribe', () =>
-      ipc.agentSubscribe(new Channel<ipc.AgentEvent>()),
-    );
-    await probe('agent_send', () => ipc.agentSend('检查磁盘'));
-    await probe('agent_interrupt', () => ipc.agentInterrupt());
-    await probe('agent_approve', () => ipc.agentApprove(1, true));
-    await probe('agent_set_scope', () => ipc.agentSetScope(['测试']));
-    await probe('audit_query', () => ipc.auditQuery());
-    await probe('audit_verify', () => ipc.auditVerify());
-    await probe('config_get', () => ipc.configGet());
-    await probe('config_set', () => ipc.configSet({
-      font_size: 14,
-      line_height: 1.4,
-      theme: 'Doric',
-      scrollback: 5000,
-      command_guard: true,
-      glass_blur: 24,
-      glass_opacity: 0.72,
-    }));
-    await probe('theme_list', () => ipc.themeList());
-    await probe('vault_has', () => ipc.vaultHas('ssh-pw:测试'));
-    await probe('vault_set', () => ipc.vaultSet('ssh-pw:test', 'x'));
-
-    setRows(out);
-    setRunning(false);
+  const mountTerminal = async (id: number, host: string) => {
+    const el = containerRef.current;
+    if (!el) return;
+    // 复用容器：先清空
+    el.innerHTML = '';
+    const h = await createTerminal(el, id, host, {
+      onChunk: (_bytes, total) => {
+        if (total < 512) setStatus(`${host}: ${total}B`);
+        if (total < 1024) addLog(`term ${id}: 容器 ${el.clientWidth}x${el.clientHeight}px`);
+      },
+      onContextLoss: () => addLog(`term ${id} CONTEXT LOST`),
+      onWebglState: (m) => addLog(`term ${id} webgl: ${m}`),
+    });
+    handleRef.current = h;
   };
 
+  /** 开本地 shell */
+  const openLocal = async () => {
+    const out = await sessionCreate(null, 100, 30);
+    if (out.status === 'ok') {
+      setStatus('本地 shell 已连接');
+      await mountTerminal(out.id, '本地');
+    }
+  };
+
+  /** 开 SSH（10.8.8.34）。无密码 → 弹窗。 */
+  const openSsh = async () => {
+    setStatus('连接中…');
+    const out = await sessionCreate(SSH_ALIAS, 100, 30);
+    if (out.status === 'need_password') {
+      setNeedPwdAlias(out.alias);
+      setStatus(`需要密码：${out.alias}`);
+      return;
+    }
+    setStatus(`${SSH_ALIAS} 已连接`);
+    await mountTerminal(out.id, SSH_ALIAS);
+  };
+
+  /** 密码弹窗确认：写 vault → 重新连接 */
+  const submitPassword = async () => {
+    if (!needPwdAlias) return;
+    try {
+      await sessionProvidePassword(needPwdAlias, pwd);
+      setPwd('');
+      setNeedPwdAlias(null);
+      setStatus('密码已保存，重新连接…');
+      await openSsh();
+    } catch (e) {
+      addLog(`密码保存失败: ${String(e)}`);
+    }
+  };
+
+  /** 关闭会话 */
+  const closeSession = async () => {
+    const h = handleRef.current;
+    if (h) {
+      await sessionClose(h.id);
+      handleRef.current = null;
+      setStatus('已关闭');
+      if (containerRef.current) containerRef.current.innerHTML = '';
+    }
+  };
+
+  // 自动验证流程（Phase 2 验收）：
+  // 1. 开 SSH（vault 有密码直连）2. 注入中文测试命令 3. 8 会话并发创建调查
   useEffect(() => {
-    void run();
+    (async () => {
+      // 本地 shell 优先（SSH 服务器当前握手被拒，见验证报告）
+      await openLocal();
+      // 2s 后向本地注入中文验证（免辅助权限）
+      setTimeout(() => {
+        const h = handleRef.current;
+        if (h) {
+          void (async () => {
+            const { sessionWrite } = await import('./ipc/commands');
+            await sessionWrite(h.id, 'echo "中文测试总用量 4"; ll\n');
+            addLog('auto-injected: echo 中文 + ll (local)');
+          })();
+        }
+      }, 2500);
+      // 15s 后尝试 SSH（服务器若解除限流则连接；失败不覆盖本地终端）
+      setTimeout(() => {
+        void openSsh().then(() => {
+          const h = handleRef.current;
+          if (h && h.host !== '本地') {
+            setTimeout(() => {
+              void (async () => {
+                const { sessionWrite } = await import('./ipc/commands');
+                await sessionWrite(h.id, 'echo "中文测试总用量 4"; ll\n');
+                addLog('auto-injected: echo 中文 + ll (ssh)');
+              })();
+            }, 3000);
+          }
+        });
+      }, 5000);
+      // PTY 并发调查（用户要求确认 Spike 的 TERMINAL_COUNT=2 是否真实限制）：
+      // 循环创建 8 个本地会话（不挂载终端），后端日志统计 created 数
+      setTimeout(() => {
+        void (async () => {
+          const { sessionCreate } = await import('./ipc/commands');
+          let ok = 0;
+          let fail = 0;
+          for (let i = 0; i < 8; i++) {
+            try {
+              const out = await sessionCreate(null, 100, 30);
+              if (out.status === 'ok') {
+                ok++;
+                const { sessionClose } = await import('./ipc/commands');
+                await sessionClose(out.id);
+              } else fail++;
+            } catch {
+              fail++;
+            }
+          }
+          addLog(`并发调查: 创建成功 ${ok} / 失败 ${fail} / 共 8`);
+        })();
+      }, 6000);
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const ok = rows.filter((r) => r.status === 'ok').length;
-  const fail = rows.length - ok;
-
   return (
-    <div className="probe">
-      <h1>ARES Phase 1 — command 探针</h1>
-      <p>
-        结果：<span className="ok">ok {ok}</span> / <span className="fail">fail {fail}</span>
-        {running && '（运行中…）'}
-      </p>
-      <button onClick={() => void run()}>重新遍历</button>
-      <table>
-        <thead>
-          <tr>
-            <th>command</th>
-            <th>状态</th>
-            <th>返回</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((r) => (
-            <tr key={r.name}>
-              <td>{r.name}</td>
-              <td className={r.status}>{r.status}</td>
-              <td className="detail">{r.detail}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+    <div className="shell">
+      <div className="toolbar">
+        <button onClick={() => void openLocal()}>+ 本地</button>
+        <button onClick={() => void openSsh()}>+ SSH({SSH_ALIAS})</button>
+        <button onClick={() => void closeSession()}>✕ 关闭</button>
+        <span className="status">{status}</span>
+        <span className="log">{log[log.length - 1] ?? ''}</span>
+      </div>
+      <div className="term-wrap">
+        <div ref={containerRef} className="term" />
+      </div>
+      {needPwdAlias && (
+        <div className="pwd-overlay">
+          <div className="pwd-box">
+            <h2>连接 {needPwdAlias} 需要密码</h2>
+            <input
+              type="password"
+              value={pwd}
+              onChange={(e) => setPwd(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && void submitPassword()}
+              placeholder="SSH 密码"
+              autoFocus
+            />
+            <div className="pwd-actions">
+              <button onClick={() => setNeedPwdAlias(null)}>取消</button>
+              <button className="primary" onClick={() => void submitPassword()}>
+                保存并连接
+              </button>
+            </div>
+            <p className="hint">密码加密存入本地 vault（AES-256-GCM），不会进入前端进程。</p>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -18,6 +18,11 @@ export interface SessionInfo {
   rows: number;
 }
 
+/** session_create 的结果：直接建好或需要密码 */
+export type SessionCreateOutcome =
+  | { status: 'ok'; id: SessionId; kind: string; host_alias: string | null; title: string; connected: boolean; cols: number; rows: number }
+  | { status: 'need_password'; alias: string };
+
 export interface PtyChunk {
   id: SessionId;
   /** base64 原始 PTY 字节 */
@@ -28,8 +33,13 @@ export function sessionCreate(
   hostAlias: string | null,
   cols: number,
   rows: number,
-): Promise<SessionInfo> {
+): Promise<SessionCreateOutcome> {
   return invoke('session_create', { hostAlias, cols, rows });
+}
+
+/** 写入 SSH 密码到 vault（★ 只写不读；前端永远拿不到明文）。 */
+export function sessionProvidePassword(alias: string, secret: string): Promise<void> {
+  return invoke('session_provide_password', { alias, secret });
 }
 
 export function sessionSubscribe(

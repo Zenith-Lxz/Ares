@@ -1,4 +1,4 @@
-/* ARES 前端基础样式（Phase 1：调试页） */
+/* ARES 前端样式（Phase 2：终端布局 + Doric） */
 
 :root {
   --marble: #e8e0d5;
@@ -27,76 +27,147 @@ body {
   color: var(--marble);
 }
 
-/* Phase 1 调试页 */
-.probe {
+/* ── 主布局 ─────────────────────────────────────── */
+.shell {
   height: 100%;
-  overflow: auto;
-  padding: 24px 32px;
+  display: flex;
+  flex-direction: column;
   background: var(--glass-bg);
   backdrop-filter: blur(var(--glass-blur)) saturate(180%);
   -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(180%);
+  border: 1px solid rgba(74, 69, 61, 0.5);
 }
 
-.probe h1 {
-  font-size: 16px;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-  color: var(--marble);
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--shadow);
+  -webkit-app-region: drag;
 }
 
-.probe p {
-  color: var(--stone);
-  font-size: 12px;
-}
-
-.probe .ok {
-  color: #8a9a5b;
-}
-
-.probe .fail {
-  color: #b85c38;
-}
-
-.probe button {
+.toolbar button {
+  -webkit-app-region: no-drag;
   background: transparent;
   color: var(--marble);
   border: 1px solid var(--shadow);
   border-radius: 4px;
-  padding: 4px 12px;
+  padding: 3px 10px;
   font-size: 12px;
   cursor: pointer;
-  margin-bottom: 16px;
+  font-family: inherit;
 }
 
-.probe button:hover {
+.toolbar button:hover {
   border-color: var(--bronze);
   color: var(--bronze);
 }
 
-.probe table {
-  width: 100%;
-  border-collapse: collapse;
+.toolbar .status {
+  margin-left: 12px;
   font-size: 12px;
-}
-
-.probe th,
-.probe td {
-  text-align: left;
-  padding: 4px 8px;
-  border-bottom: 1px solid var(--shadow);
-}
-
-.probe th {
   color: var(--stone);
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  font-weight: normal;
 }
 
-.probe td.detail {
+.toolbar .log {
+  margin-left: auto;
+  font-size: 11px;
   color: var(--stone);
-  max-width: 480px;
+  max-width: 380px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.term-wrap {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+}
+
+.term {
+  position: absolute;
+  inset: 0;
+  padding: 4px 0 4px 8px;
+}
+
+/* xterm 容器内透明 */
+.xterm {
+  height: 100%;
+}
+
+/* ── 密码弹窗 ───────────────────────────────────── */
+.pwd-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(10, 9, 8, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+
+.pwd-box {
+  background: rgba(30, 27, 24, 0.92);
+  backdrop-filter: blur(16px);
+  border: 1px solid var(--shadow);
+  border-radius: 8px;
+  padding: 24px 28px;
+  width: 360px;
+}
+
+.pwd-box h2 {
+  font-size: 14px;
+  letter-spacing: 0.08em;
+  margin: 0 0 16px;
+  color: var(--marble);
+}
+
+.pwd-box input {
+  width: 100%;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid var(--shadow);
+  border-radius: 4px;
+  color: var(--marble);
+  font-family: inherit;
+  font-size: 14px;
+  padding: 8px 10px;
+  outline: none;
+}
+
+.pwd-box input:focus {
+  border-color: var(--bronze);
+}
+
+.pwd-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.pwd-actions button {
+  flex: 1;
+  background: transparent;
+  color: var(--marble);
+  border: 1px solid var(--shadow);
+  border-radius: 4px;
+  padding: 6px;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 12px;
+}
+
+.pwd-actions button.primary {
+  background: var(--bronze);
+  border-color: var(--bronze);
+  color: #161412;
+  font-weight: 600;
+}
+
+.pwd-box .hint {
+  margin-top: 12px;
+  font-size: 11px;
+  color: var(--stone);
+  line-height: 1.5;
 }
