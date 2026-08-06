@@ -2332,7 +2332,7 @@ impl eframe::App for GuiApp {
                                 if f.auth == "password" {
                                     entry.auth = "password".into();
                                     if !f.password.trim().is_empty() {
-                                        let _ = ares_darwin::keychain::set_secret(
+                                        let _ = crate::vault::set(
                                             &format!("ssh-pw:{name}"),
                                             f.password.trim(),
                                         );
@@ -2504,8 +2504,8 @@ impl eframe::App for GuiApp {
                                 cfg.active = name.clone();
                                 match cfg.save() {
                                     Ok(()) => {
-                                        // 写 Keychain
-                                        match ares_darwin::keychain::set_secret(
+                                        // 写本地加密 vault
+                                        match crate::vault::set(
                                             &format!("llm:{name}"),
                                             f.api_key.trim(),
                                         ) {

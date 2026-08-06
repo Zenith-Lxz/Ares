@@ -406,14 +406,15 @@ fn parse_kitty_images(
     }
 }
 
-/// 写 SSH_ASKPASS 脚本（读取钥匙串 ssh-pw:<alias> 输出密码）。
-/// 脚本内容不含密码明文；700 权限。
+/// 写 SSH_ASKPASS 脚本（读本地加密 vault ssh-pw:<alias> 输出密码）。
+/// 脚本内容不含密码明文；700 权限。走 `ares vault-get`（免 keychain 授权弹窗）。
 fn write_askpass(alias: &str) -> anyhow::Result<std::path::PathBuf> {
     let dir = ares_core::paths::data_dir().join("askpass");
     std::fs::create_dir_all(&dir)?;
     let path = dir.join(format!("askpass-{alias}.sh"));
+    let self_exe = std::env::current_exe()?.display().to_string();
     let script = format!(
-        "#!/bin/sh\nexec /usr/bin/security find-generic-password -s ares -a \"ssh-pw:{alias}\" -w 2>/dev/null\n"
+        "#!/bin/sh\nexec {self_exe} vault-get \"ssh-pw:{alias}\" 2>/dev/null\n"
     );
     std::fs::write(&path, script)?;
     #[cfg(unix)]

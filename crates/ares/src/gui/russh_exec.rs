@@ -114,19 +114,18 @@ async fn exec_remote(
         .await
         .map_err(|e| format!("连接失败：{e}"))?;
 
-    // 认证：密码主机走 keychain 密码（vault），否则默认私钥依次尝试
+    // 认证：密码主机走本地加密 vault（ssh-pw:<alias>），否则默认私钥依次尝试
     let mut authed = false;
     if auth == "password" {
-        // keychain account: ssh-pw:<alias>（GUI 添加主机时写入）
-        match ares_darwin::keychain::get_secret(&format!("ssh-pw:{alias}")) {
-            Ok(Some(pw)) => {
+        match crate::vault::get_migrate(&format!("ssh-pw:{alias}")) {
+            Some(pw) => {
                 if let Ok(auth_res) = session.authenticate_password(user, pw).await {
                     authed = auth_res.success();
                 }
             }
             _ => {
                 return Err(format!(
-                    "认证失败：{alias} 配置了密码认证但钥匙串中没有密码（ssh-pw:{alias}）"
+                    "认证失败：{alias} 配置了密码认证但 vault 中没有密码（ssh-pw:{alias}）"
                 ));
             }
         }

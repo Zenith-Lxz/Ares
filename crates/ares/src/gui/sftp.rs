@@ -236,18 +236,18 @@ async fn connect_sftp(
         .await
         .map_err(|e| format!("连接失败：{e}"))?;
 
-    // 认证：密码主机走 keychain（ssh-pw:<alias>），否则依次尝试默认私钥
+    // 认证：密码主机走本地加密 vault（ssh-pw:<alias>），否则依次尝试默认私钥
     let mut authed = false;
     if auth == "password" {
-        match ares_darwin::keychain::get_secret(&format!("ssh-pw:{alias}")) {
-            Ok(Some(pw)) => {
+        match crate::vault::get_migrate(&format!("ssh-pw:{alias}")) {
+            Some(pw) => {
                 if let Ok(res) = session.authenticate_password(user, pw).await {
                     authed = res.success();
                 }
             }
             _ => {
                 return Err(format!(
-                    "认证失败：{alias} 配置了密码认证但钥匙串中没有密码（ssh-pw:{alias}）"
+                    "认证失败：{alias} 配置了密码认证但 vault 中没有密码（ssh-pw:{alias}）"
                 ));
             }
         }

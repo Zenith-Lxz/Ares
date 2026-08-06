@@ -28,6 +28,12 @@ pub enum Command {
         #[command(subcommand)]
         action: ProviderAction,
     },
+
+    /// 读本地 vault 凭据（SSH_ASKPASS 脚本调用；stdout 输出 secret）
+    VaultGet {
+        /// vault alias（如 ssh-pw:测试）
+        alias: String,
+    },
 }
 
 #[derive(Subcommand)]

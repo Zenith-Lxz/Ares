@@ -579,7 +579,8 @@ impl GpuTerminalRenderer {
         };
         let w = w.min(*tw);
         let h = h.min(*th);
-        let bpr = w * 4;
+        // COPY_BYTES_PER_ROW_ALIGNMENT = 256（wgpu 硬性要求）
+        let bpr = (w * 4).div_ceil(256) * 256;
         let buf = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("dump"),
             size: (bpr as u64) * h as u64,
@@ -623,7 +624,14 @@ impl GpuTerminalRenderer {
             .map_err(|_| "map timeout".to_string())?
             .map_err(|e| format!("map: {e:?}"))?;
         let data = slice.get_mapped_range();
-        let img = image::RgbaImage::from_raw(w, h, data.to_vec()).ok_or("img")?;
+        // bpr 含 padding：逐行拷贝跳过 padding，只保留有效像素
+        let raw = data.to_vec();
+        let mut row_data = Vec::with_capacity(w as usize * h as usize * 4);
+        for r in 0..h as usize {
+            let start = r * bpr as usize;
+            row_data.extend_from_slice(&raw[start..start + w as usize * 4]);
+        }
+        let img = image::RgbaImage::from_raw(w, h, row_data).ok_or("img")?;
         img.save(path).map_err(|e| e.to_string())?;
         drop(data);
         buf.unmap();

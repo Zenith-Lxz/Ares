@@ -2,6 +2,7 @@ mod cli;
 mod gui;
 mod mcp;
 mod repl;
+mod vault;
 
 use anyhow::{Context, Result};
 use ares_agent::{AgentLoop, Approver, CliApprover};
@@ -35,6 +36,13 @@ fn main() -> Result<()> {
         }
         Some(Command::Audit { action }) => cmd_audit(action),
         Some(Command::Provider { action }) => cmd_provider(action),
+        Some(Command::VaultGet { alias }) => {
+            // SSH_ASKPASS 用途：stdout 直接输出 secret（无换行）
+            if let Some(s) = crate::vault::get_migrate(&alias) {
+                print!("{s}");
+            }
+            Ok(())
+        }
         // M1.5 形态调整（2026-08-05 用户拍板）：默认入口 = 简易 iTerm2 GUI
         None => {
             use std::io::IsTerminal;
@@ -166,8 +174,8 @@ fn cmd_provider(action: ProviderAction) -> Result<()> {
                 anyhow::bail!("API key 不能为空");
             }
 
-            ares_darwin::keychain::set_secret(&entry.keychain_account, key.trim())?;
-            println!("✓ 已写入 Keychain：{}", entry.keychain_account);
+            crate::vault::set(&entry.keychain_account, key.trim()).map_err(anyhow::Error::msg)?;
+            println!("✓ 已写入本地加密 vault：{}", entry.keychain_account);
             Ok(())
         }
     }
@@ -204,13 +212,12 @@ pub(crate) async fn build_agent(
 
     let providers = ProvidersConfig::load()?;
     let (name, entry) = providers.active_entry()?;
-    let api_key =
-        ares_darwin::keychain::get_secret(&entry.keychain_account)?.with_context(|| {
-            format!(
-                "Keychain 中没有 {}。请先运行：ares provider add {name}",
-                entry.keychain_account
-            )
-        })?;
+    let api_key = crate::vault::get_migrate(&entry.keychain_account).with_context(|| {
+        format!(
+            "vault 中没有 {}。请先运行：ares provider add {name}",
+            entry.keychain_account
+        )
+    })?;
 
     let provider: Arc<dyn Provider> = match entry.kind {
         ProviderKind::Openai => Arc::new(OpenAiProvider::new(name, &entry.base_url, api_key)),
