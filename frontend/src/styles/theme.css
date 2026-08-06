@@ -1,0 +1,102 @@
+/* ARES 前端基础样式（Phase 1：调试页） */
+
+:root {
+  --marble: #e8e0d5;
+  --bronze: #c08552;
+  --stone: #7d7668;
+  --shadow: #4a453d;
+  --glass-bg: rgba(22, 20, 18, 0.72);
+  --glass-blur: 24px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: transparent;
+  font-family: 'Fira Code', Menlo, monospace;
+}
+
+body {
+  color: var(--marble);
+}
+
+/* Phase 1 调试页 */
+.probe {
+  height: 100%;
+  overflow: auto;
+  padding: 24px 32px;
+  background: var(--glass-bg);
+  backdrop-filter: blur(var(--glass-blur)) saturate(180%);
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(180%);
+}
+
+.probe h1 {
+  font-size: 16px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--marble);
+}
+
+.probe p {
+  color: var(--stone);
+  font-size: 12px;
+}
+
+.probe .ok {
+  color: #8a9a5b;
+}
+
+.probe .fail {
+  color: #b85c38;
+}
+
+.probe button {
+  background: transparent;
+  color: var(--marble);
+  border: 1px solid var(--shadow);
+  border-radius: 4px;
+  padding: 4px 12px;
+  font-size: 12px;
+  cursor: pointer;
+  margin-bottom: 16px;
+}
+
+.probe button:hover {
+  border-color: var(--bronze);
+  color: var(--bronze);
+}
+
+.probe table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.probe th,
+.probe td {
+  text-align: left;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--shadow);
+}
+
+.probe th {
+  color: var(--stone);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-weight: normal;
+}
+
+.probe td.detail {
+  color: var(--stone);
+  max-width: 480px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
