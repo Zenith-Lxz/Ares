@@ -359,7 +359,7 @@ impl GpuTerminalRenderer {
                 b => Some(color_of(b, theme)),
             };
             if is_cursor_row && c == cursor.1 && cursor_style == "block" && !blink_off {
-                let _ = std::mem::swap(&mut fg, bg.get_or_insert(theme.cursor));
+                std::mem::swap(&mut fg, bg.get_or_insert(theme.cursor));
                 // 反色：fg=原 bg，bg=原 fg
                 if let Some(b) = &mut bg {
                     *b = color_of(cell.fgcolor(), theme);
@@ -428,7 +428,7 @@ impl GpuTerminalRenderer {
         // 字形（含 emoji / 连字）
         for s in &segs {
             match s.kind {
-                FontKind::Emoji => self.push_emoji(&mut out, &s, cell_w, cell_h),
+                FontKind::Emoji => self.push_emoji(&mut out, s, cell_w, cell_h),
                 _ => self.push_shaped(&mut out, &s, cell_w, cell_h),
             }
         }
