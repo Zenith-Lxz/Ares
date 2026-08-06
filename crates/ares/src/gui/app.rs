@@ -42,6 +42,10 @@ struct TermWorkspace {
     last_sizes: Vec<Option<(u16, u16)>>,
     /// 主机指定的主题名（主题随主机切换；None = 跟随全局）
     theme: Option<String>,
+    /// 文本选区（M2：拖选复制；绘制行坐标含滚动偏移）
+    selection: Option<crate::gui::term::SelectRange>,
+    /// 拖选起始 cell（正在拖动时 Some）
+    drag_start: Option<(u16, u16)>,
 }
 
 impl TermWorkspace {
@@ -56,6 +60,8 @@ impl TermWorkspace {
             split: None,
             last_sizes: vec![None],
             theme,
+            selection: None,
+            drag_start: None,
         }
     }
 
@@ -70,6 +76,28 @@ impl TermWorkspace {
     /// 全部 pane 是否已收到首笔数据（连接中反馈）。
     fn is_connected(&self) -> bool {
         !self.sessions.is_empty() && self.sessions.iter().all(|s| s.is_connected())
+    }
+
+    /// 提取选区文本（M2：Cmd+C 复制；含行间换行）。
+    fn selection_text(ws: &Self) -> String {
+        let Some(sel) = &ws.selection else {
+            return String::new();
+        };
+        let screen = ws.sessions[ws.active].screen();
+        let mut out = String::new();
+        for r in sel.row0..=sel.row1 {
+            let c0 = if r == sel.row0 { sel.col0 } else { 0 };
+            let c1 = if r == sel.row1 { sel.col1 } else { u16::MAX };
+            for c in c0..=c1 {
+                if let Some(cell) = screen.cell(r, c) {
+                    out.push_str(&cell.contents());
+                }
+            }
+            if r != sel.row1 {
+                out.push('\n');
+            }
+        }
+        out
     }
 
     /// 分屏：把新会话加为第二个 pane。已有 split 时替换第二个。
@@ -535,11 +563,14 @@ impl GuiApp {
                 egui::Event::MouseWheel { delta, .. } => {
                     // 终端区域滚轮 → 滚动回退（scrollback，M1）
                     if !any_focus {
-                        if let Some(Tab::Term(ws)) = self.tabs.get(self.active) {
+                        if let Some(Tab::Term(ws)) = self.tabs.get_mut(self.active) {
                             let s = &ws.sessions[ws.active];
                             let d = (delta.y * 3.0).round() as i32;
                             if d != 0 {
                                 s.scroll_lines(d);
+                                // 滚动后选区坐标失效：清除
+                                ws.selection = None;
+                                ws.drag_start = None;
                             }
                         }
                     }
@@ -613,6 +644,16 @@ impl GuiApp {
                                 continue;
                             }
                             _ => {}
+                        }
+                    }
+                    // Cmd+C：复制选区（M2；终端标准行为）
+                    if modifiers.command && key == egui::Key::C {
+                        if let Some(Tab::Term(ws)) = self.tabs.get(self.active) {
+                            let text = TermWorkspace::selection_text(ws);
+                            if !text.is_empty() {
+                                ctx.copy_text(text);
+                                continue;
+                            }
                         }
                     }
                     // 转发给当前终端会话（可打印字符已走 Event::Text；SFTP 面板不转发；
@@ -898,6 +939,55 @@ impl AgentBridge {
         self.save_session();
         self.busy = false;
         None
+    }
+}
+
+/// 终端鼠标交互：拖选复制（M2）+ 点击清除焦点/选区。
+fn term_mouse_interact(
+    ctx: &egui::Context,
+    ui: &egui::Ui,
+    ws: &mut TermWorkspace,
+    rect: egui::Rect,
+    origin: egui::Pos2,
+    rows: u16,
+    cols: u16,
+    cell_w: f32,
+    cell_h: f32,
+) {
+    if cell_w <= 0.0 || cell_h <= 0.0 || rows == 0 || cols == 0 {
+        return;
+    }
+    let id = ui
+        .id()
+        .with(("term_mouse", ws.sessions[ws.active].alias.clone()));
+    let resp = ui.interact(rect, id, egui::Sense::click_and_drag());
+    let to_cell = |pos: egui::Pos2| -> (u16, u16) {
+        let c = ((pos.x - origin.x) / cell_w)
+            .floor()
+            .clamp(0.0, (cols - 1) as f32) as u16;
+        let r = ((pos.y - origin.y) / cell_h)
+            .floor()
+            .clamp(0.0, (rows - 1) as f32) as u16;
+        (r, c)
+    };
+    if resp.drag_started() {
+        if let Some(p) = resp.interact_pointer_pos() {
+            let (r, c) = to_cell(p);
+            ws.drag_start = Some((r, c));
+            ws.selection = Some(crate::gui::term::SelectRange::normalized(r, c, r, c));
+        }
+    } else if resp.dragged() {
+        if let (Some((r0, c0)), Some(p)) = (ws.drag_start, resp.interact_pointer_pos()) {
+            let (r1, c1) = to_cell(p);
+            ws.selection = Some(crate::gui::term::SelectRange::normalized(r0, c0, r1, c1));
+        }
+    } else if resp.drag_stopped() {
+        ws.drag_start = None;
+    }
+    if resp.clicked() && ws.drag_start.is_none() {
+        // 纯点击：清焦点 + 清选区
+        ctx.memory_mut(|m| m.stop_text_input());
+        ws.selection = None;
     }
 }
 
@@ -1630,15 +1720,19 @@ impl eframe::App for GuiApp {
                             self.last_resize = std::time::Instant::now();
                         }
                         let screen = ws.sessions[0].screen();
-                        term::draw_terminal(ui, &screen, mono_font(self.font_size), &cur_theme);
-                        // 点击终端空白处：清除输入框焦点，恢复直接输入
+                        term::draw_terminal(
+                            ui,
+                            &screen,
+                            mono_font(self.font_size),
+                            &cur_theme,
+                            ws.selection.as_ref(),
+                        );
+                        // 鼠标交互：拖选复制 + 点击清焦点（M2）
                         let tr = ui.available_rect_before_wrap();
-                        if ui
-                            .interact(tr, ui.id().with("term_focus"), egui::Sense::click())
-                            .clicked()
-                        {
-                            ctx.memory_mut(|m| m.stop_text_input());
-                        }
+                        let cell_w = ui.fonts(|f| f.glyph_width(&mono_font(self.font_size), 'M'));
+                        let cell_h = ui.fonts(|f| f.row_height(&mono_font(self.font_size)));
+                        let (rows, cols) = (screen.size().0, screen.size().1);
+                        term_mouse_interact(ctx, ui, ws, tr, tr.min, rows, cols, cell_w, cell_h);
                     } else {
                         // 分屏：按方向均分区域，每个 pane 独立渲染
                         let split = ws.split.unwrap_or(Split::Vertical);
@@ -1683,11 +1777,17 @@ impl eframe::App for GuiApp {
                                 self.last_resize = std::time::Instant::now();
                             }
                             let screen = s.screen();
+                            let sel = if i == ws.active {
+                                ws.selection.as_ref()
+                            } else {
+                                None
+                            };
                             term::draw_terminal(
                                 &mut child,
                                 &screen,
                                 mono_font(self.font_size),
                                 &cur_theme,
+                                sel,
                             );
                         }
                         // 分割线

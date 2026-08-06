@@ -67,11 +67,54 @@ pub fn bg_color(vt: vt100::Color, theme: &Theme) -> Color32 {
     }
 }
 
+/// 终端选区（绘制行坐标，含滚动偏移；row0<=row1；若同行为单格）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SelectRange {
+    pub row0: u16,
+    pub col0: u16,
+    pub row1: u16,
+    pub col1: u16,
+}
+
+impl SelectRange {
+    pub fn normalized(row0: u16, col0: u16, row1: u16, col1: u16) -> Self {
+        if (row0, col0) <= (row1, col1) {
+            Self {
+                row0,
+                col0,
+                row1,
+                col1,
+            }
+        } else {
+            Self {
+                row0: row1,
+                col0: col1,
+                row1: row0,
+                col1: col0,
+            }
+        }
+    }
+
+    pub fn contains(&self, r: u16, c: u16) -> bool {
+        if r < self.row0 || r > self.row1 {
+            return false;
+        }
+        if r == self.row0 && c < self.col0 {
+            return false;
+        }
+        if r == self.row1 && c > self.col1 {
+            return false;
+        }
+        true
+    }
+}
+
 pub fn draw_terminal(
     ui: &mut egui::Ui,
     screen: &vt100::Screen,
     font: FontId,
     theme: &Theme,
+    selection: Option<&SelectRange>,
 ) -> (u16, u16) {
     let (rows, cols) = screen.size();
     let painter = ui.painter();
@@ -94,7 +137,7 @@ pub fn draw_terminal(
     // egui 即时模式：每帧全画（上一帧不保留）。静止时由数据驱动
     // repaint 控制（读线程无数据不触发重画 → egui 不重画帧 → 画面保留）。
     for r in 0..rows {
-        draw_row(painter, screen, r, cols, &lay, theme);
+        draw_row(painter, screen, r, cols, &lay, theme, selection);
     }
 
     // 光标：主题色反色块
@@ -132,6 +175,7 @@ fn draw_row(
     cols: u16,
     lay: &RowLayout,
     theme: &Theme,
+    selection: Option<&SelectRange>,
 ) {
     let base_y = lay.origin.y + r as f32 * lay.cell_h;
     // 整行空（无内容、无背景）快速跳过 —— 终端大部分行是空的
@@ -161,6 +205,7 @@ fn draw_row(
             continue;
         }
         let pos = pos2(lay.origin.x + c as f32 * lay.cell_w, base_y);
+        let selected = selection.map_or(false, |s| s.contains(r, c));
         let bg = cell.bgcolor();
         if bg != vt100::Color::Default {
             painter.rect_filled(
@@ -173,6 +218,22 @@ fn draw_row(
             );
         }
         let fg = fg_color(cell.fgcolor(), theme);
+        // 选中：前景/背景反色（macOS 终端风格高亮）
+        let (fg, bg) = if selected {
+            (bg_color(bg, theme), fg)
+        } else {
+            (fg, bg_color(bg, theme))
+        };
+        if selected {
+            painter.rect_filled(
+                Rect::from_min_size(
+                    pos,
+                    Vec2::new(lay.cell_w * contents.chars().count() as f32, lay.cell_h),
+                ),
+                0.0,
+                bg,
+            );
+        }
         match segments.last_mut() {
             Some((_, text, last_fg)) if *last_fg == fg => text.push_str(&contents),
             _ => segments.push((c, contents, fg)),
