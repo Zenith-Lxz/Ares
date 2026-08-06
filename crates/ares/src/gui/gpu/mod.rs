@@ -483,7 +483,8 @@ impl GpuTerminalRenderer {
                     let uv = atlas::rect_to_uv(&rect, 2048.0);
                     out.push(RowGlyph {
                         x: x + lx as f32 / self.scale,
-                        y: y_base + ty as f32 / self.scale,
+                        // FreeType 语义：bitmap_top 正值 = 位图顶部在基线上方
+                        y: y_base - ty as f32 / self.scale,
                         w: gw as f32 / self.scale,
                         h: gh as f32 / self.scale,
                         uv,
@@ -538,7 +539,8 @@ impl GpuTerminalRenderer {
                         let y_base = cell_h * 0.78;
                         out.push(RowGlyph {
                             x: x + bitmap.placement.left as f32 / self.scale,
-                            y: y_base + bitmap.placement.top as f32 / self.scale,
+                            // FreeType 语义：bitmap_top 正值 = 位图顶部在基线上方
+                            y: y_base - bitmap.placement.top as f32 / self.scale,
                             w: gw as f32 / self.scale,
                             h: gh as f32 / self.scale,
                             uv,
@@ -549,6 +551,65 @@ impl GpuTerminalRenderer {
             }
             x += cell_w;
         }
+    }
+
+    /// 调试：把终端纹理读回并保存 PNG（人工检查字形）。
+    #[allow(dead_code)]
+    pub fn dump_png(&self, path: &str, w: u32, h: u32) -> Result<(), String> {
+        let Some((tex, _, tw, th)) = &self.target else {
+            return Err("no target".into());
+        };
+        let w = w.min(*tw);
+        let h = h.min(*th);
+        let bpr = w * 4;
+        let buf = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("dump"),
+            size: (bpr as u64) * h as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut enc = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("dump-enc"),
+            });
+        enc.copy_texture_to_buffer(
+            wgpu::ImageCopyTexture {
+                texture: tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::ImageCopyBuffer {
+                buffer: &buf,
+                layout: wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(bpr),
+                    rows_per_image: Some(h),
+                },
+            },
+            wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+        );
+        self.queue.submit(Some(enc.finish()));
+        let slice = buf.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r);
+        });
+        self.device.poll(wgpu::Maintain::Wait);
+        rx.recv()
+            .map_err(|_| "map timeout".to_string())?
+            .map_err(|e| format!("map: {e:?}"))?;
+        let data = slice.get_mapped_range();
+        let img = image::RgbaImage::from_raw(w, h, data.to_vec()).ok_or("img")?;
+        img.save(path).map_err(|e| e.to_string())?;
+        drop(data);
+        buf.unmap();
+        Ok(())
     }
 }
 
@@ -569,7 +630,9 @@ fn create_target(
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: wgpu::TextureFormat::Rgba8UnormSrgb,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::COPY_SRC,
         view_formats: &[],
     });
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
