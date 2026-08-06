@@ -4,6 +4,7 @@ pub mod app;
 pub mod approver;
 pub mod exec;
 pub mod layout;
+pub mod ligatures;
 pub mod plan_approver;
 pub mod russh_exec;
 pub mod session;

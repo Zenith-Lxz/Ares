@@ -4,7 +4,7 @@
 //! 256 色映射用标准 ANSI 算法；光标用反色块表示。
 //! 主题化（2026-08-05 批次8）：Default 色 → 主题 fg/bg，ANSI 0-15 → 主题调色板。
 
-use egui::{pos2, Align2, Color32, FontId, Rect, Vec2};
+use egui::{pos2, Color32, FontId, Rect, Vec2};
 
 use super::themes::Theme;
 
@@ -149,6 +149,7 @@ pub fn draw_terminal(
     cursor_style: &str,
     cursor_blink: bool,
     images: &[(u16, u16, Vec<u8>)],
+    ligs: Option<&crate::gui::ligatures::LigatureEngine>,
 ) -> (u16, u16) {
     let (rows, cols) = screen.size();
     let painter = ui.painter();
@@ -211,7 +212,9 @@ pub fn draw_terminal(
     // egui 即时模式：每帧全画（上一帧不保留）。静止时由数据驱动
     // repaint 控制（读线程无数据不触发重画 → egui 不重画帧 → 画面保留）。
     for r in 0..rows {
-        draw_row(painter, screen, r, cols, &lay, theme, selection, &blocked);
+        draw_row(
+            painter, screen, r, cols, &lay, theme, selection, &blocked, ligs,
+        );
     }
 
     // 光标（M3）：block / beam / underline，可选闪烁（0.5s 周期）
@@ -282,6 +285,7 @@ fn draw_row(
     theme: &Theme,
     selection: Option<&SelectRange>,
     blocked: &[std::collections::HashSet<u16>],
+    ligs: Option<&crate::gui::ligatures::LigatureEngine>,
 ) {
     let base_y = lay.origin.y + r as f32 * lay.cell_h;
     // 段：(起始列, 文本, 前景色)
@@ -337,33 +341,89 @@ fn draw_row(
     }
     for (start_col, text, fg) in segments {
         let pos = pos2(lay.origin.x + start_col as f32 * lay.cell_w, base_y);
-        // 超链接（M5）：URL 段下划线 + 链接色；点击在 app 层处理
-        if let Some((s, e, _)) = find_url(&text) {
-            let link_col = Color32::from_rgb(80, 160, 255);
+        draw_text_segment(painter, pos, &text, &lay, fg, ligs);
+    }
+}
+
+/// 绘制一段文本：URL 下划线（M5）+ 连字位图（M8）+ 普通文本。
+fn draw_text_segment(
+    painter: &egui::Painter,
+    pos: egui::Pos2,
+    text: &str,
+    lay: &RowLayout,
+    fg: Color32,
+    ligs: Option<&crate::gui::ligatures::LigatureEngine>,
+) {
+    let link_col = Color32::from_rgb(80, 160, 255);
+    let mut x = pos.x;
+    let mut i = 0usize;
+    let text_len = text.len();
+    while i < text_len {
+        // 连字优先（最长匹配）
+        let lig_hit = ligs.and_then(|l| l.find_at(text, i));
+        if let Some((ls, le, lig)) = lig_hit {
+            if ls > i {
+                let part = &text[i..ls];
+                x += paint_plain(painter, egui::pos2(x, pos.y), part, lay, fg);
+            }
+            painter.image(
+                lig.tex.id(),
+                egui::Rect::from_min_size(
+                    egui::pos2(x, pos.y),
+                    egui::vec2(lig.width_px, lig.height_px),
+                ),
+                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                Color32::WHITE,
+            );
+            x += lig.width_px;
+            i = le;
+            continue;
+        }
+        // URL 检测（在当前剩余部分找）
+        if let Some((s, e, _)) = find_url(&text[i..]) {
+            let (s, e) = (s + i, e + i);
+            if s > i {
+                let part = &text[i..s];
+                x += paint_plain(painter, egui::pos2(x, pos.y), part, lay, fg);
+            }
             let mut job = egui::text::LayoutJob::default();
             let fmt = |color: Color32, underline: bool| egui::text::TextFormat {
                 font_id: lay.font.clone(),
                 color,
                 underline: if underline {
-                    egui::Stroke::new(1.0, link_col)
+                    egui::Stroke::new(1.0_f32, link_col)
                 } else {
                     egui::Stroke::NONE
                 },
                 ..Default::default()
             };
-            if s > 0 {
-                job.append(&text[..s], 0.0, fmt(fg, false));
-            }
             job.append(&text[s..=e], 0.0, fmt(link_col, true));
-            if e + 1 < text.len() {
-                job.append(&text[e + 1..], 0.0, fmt(fg, false));
-            }
             let galley = painter.layout_job(job);
-            painter.galley(pos, galley, fg);
-        } else {
-            painter.text(pos, Align2::LEFT_TOP, text, lay.font.clone(), fg);
+            let w = galley.size().x;
+            painter.galley(egui::pos2(x, pos.y), galley, fg);
+            x += w;
+            i = e + 1;
+            continue;
         }
+        // 普通余段
+        let part = &text[i..];
+        x += paint_plain(painter, egui::pos2(x, pos.y), part, lay, fg);
+        break;
     }
+}
+
+/// 绘制普通文本并返回像素宽度。
+fn paint_plain(
+    painter: &egui::Painter,
+    pos: egui::Pos2,
+    text: &str,
+    lay: &RowLayout,
+    fg: Color32,
+) -> f32 {
+    let galley = painter.layout(text.to_string(), lay.font.clone(), fg, f32::INFINITY);
+    let w = galley.size().x;
+    painter.galley(pos, galley, fg);
+    w
 }
 
 /// 从 ui 区域推导终端行列数（等宽字体）。

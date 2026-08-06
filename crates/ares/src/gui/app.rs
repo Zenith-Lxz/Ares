@@ -238,6 +238,8 @@ pub struct GuiApp {
     theme_name: String,
     /// 终端字号（批次8，默认 14）
     font_size: f32,
+    /// 连字引擎（M8：按 cell 高构建；字号变化时重建）
+    ligatures: Option<crate::gui::ligatures::LigatureEngine>,
     /// 主题导入路径输入（.itermcolors）
     theme_import: String,
     theme_msg: Option<String>,
@@ -293,6 +295,7 @@ impl GuiApp {
             theme,
             theme_name,
             font_size,
+            ligatures: None,
             hosts,
             ssh_imports,
             tabs: Vec::new(),
@@ -1792,6 +1795,14 @@ impl eframe::App for GuiApp {
                 );
             }
             let cur_theme = self.current_theme();
+            // 连字引擎（M8）：懒构建，按当前行高；字号变化自动重建
+            let cell_h_now = ui.fonts(|f| f.row_height(&mono_font(self.font_size)));
+            if self.ligatures.is_none() {
+                self.ligatures = Some(crate::gui::ligatures::LigatureEngine::build(
+                    ctx, cell_h_now,
+                ));
+            }
+            let ligs = self.ligatures.as_ref();
             match self.tabs.get_mut(self.active) {
                 Some(Tab::Term(ws)) => {
                     let n = ws.sessions.len();
@@ -1819,6 +1830,7 @@ impl eframe::App for GuiApp {
                             &self.settings.cursor_style,
                             self.settings.cursor_blink,
                             &imgs,
+                            ligs,
                         );
                         // 鼠标交互：拖选复制 + 点击清焦点（M2）
                         let tr = ui.available_rect_before_wrap();
@@ -1888,6 +1900,7 @@ impl eframe::App for GuiApp {
                                 &self.settings.cursor_style,
                                 self.settings.cursor_blink,
                                 &imgs,
+                                ligs,
                             );
                         }
                         // 分割线
@@ -2413,6 +2426,7 @@ impl eframe::App for GuiApp {
                             {
                                 self.settings.font_size = self.font_size;
                                 self.settings.save();
+                                self.ligatures = None; // 字号变化 → 重建连字
                             }
                             ui.end_row();
                             ui.label("光标样式");
