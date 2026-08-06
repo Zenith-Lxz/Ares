@@ -75,7 +75,7 @@ impl LigatureEngine {
                     continue;
                 }
                 let start_x = (x_off + metrics.xmin as f32).round() as i32;
-                let target_y = px as i32 - metrics.height as i32 - metrics.ymin as i32;
+                let target_y = px as i32 - metrics.height as i32 - metrics.ymin;
                 for (by, row) in bitmap.chunks(metrics.width).enumerate() {
                     let ty = target_y + by as i32;
                     if ty < 0 || ty >= px as i32 {

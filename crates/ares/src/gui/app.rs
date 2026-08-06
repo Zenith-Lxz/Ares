@@ -998,6 +998,7 @@ impl AgentBridge {
 }
 
 /// 终端鼠标交互：拖选复制（M2）+ 点击清除焦点/选区。
+#[allow(clippy::too_many_arguments)]
 fn term_mouse_interact(
     ctx: &egui::Context,
     ui: &egui::Ui,
