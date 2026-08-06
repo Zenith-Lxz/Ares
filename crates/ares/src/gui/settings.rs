@@ -28,7 +28,8 @@ impl Default for GuiSettings {
         Self {
             theme_name: "Default".into(),
             font_size: 14.0,
-            hide_tabs: false,
+            // 极简：默认隐藏 tab 标签（Ctrl+1-9 切换；设置里可重新开启）
+            hide_tabs: true,
             undecorated: false,
             background_image: String::new(),
         }

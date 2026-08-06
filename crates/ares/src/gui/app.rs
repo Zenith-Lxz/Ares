@@ -98,10 +98,12 @@ impl TermWorkspace {
     }
 }
 
-/// 一个 tab：终端工作区或 SFTP 面板。
+/// 一个 tab：终端工作区、SFTP 面板或主机列表页。
 enum Tab {
     Term(TermWorkspace),
     Sftp(SftpPanel),
+    /// 主机列表页（极简 UI：不弹窗，作为一个可关闭的 tab）
+    Picker,
 }
 
 impl Tab {
@@ -109,6 +111,7 @@ impl Tab {
         match self {
             Tab::Term(w) => w.title(),
             Tab::Sftp(p) => &p.title,
+            Tab::Picker => "主机",
         }
     }
 }
@@ -174,6 +177,14 @@ pub struct GuiApp {
     split_pending: Option<Split>,
     /// Agent 目标主机集合（多主机编排；chips 多选）。
     agent_targets: std::collections::BTreeSet<String>,
+    /// Agent 后台构建中（避免 block_on 卡 GUI 帧 + keychain 授权弹窗）。
+    agent_starting: bool,
+    /// Agent 构建/事件通道（GuiApp 持有，与 AgentBridge 共用）。
+    agent_tx: Sender<AgentEvent>,
+    /// AgentBridge 的事件接收端（重建 bridge 时 take）。
+    agent_rx: Option<Receiver<AgentEvent>>,
+    /// Agent 构建失败信息（面板显示 + 配置入口）。
+    agent_error: Option<String>,
     /// 对话历史弹窗 + 恢复（a4 对话持久化）。
     history_modal: bool,
     history_preview: Option<Vec<(String, String)>>,
@@ -230,6 +241,8 @@ enum AgentEvent {
     Turn(Result<TurnResult, String>),
     /// 自进化反思结果（已写入记忆库的摘要）
     Reflection(String),
+    /// 后台构建 Agent 完成（成功 → bridge 数据；失败 → 错误文本）
+    AgentBuilt(Result<AgentLoop, String>, Option<Vec<(String, String)>>),
 }
 
 impl GuiApp {
@@ -245,6 +258,7 @@ impl GuiApp {
         let theme = crate::gui::themes::load_theme(&settings.theme_name);
         let theme_name = settings.theme_name.clone();
         let font_size = settings.font_size;
+        let (agent_tx, agent_rx) = std::sync::mpsc::channel();
         Self {
             theme,
             theme_name,
@@ -258,6 +272,10 @@ impl GuiApp {
             picking: true, // 启动即打开主机选择
             filter: String::new(),
             filter_selected: None,
+            agent_starting: false,
+            agent_error: None,
+            agent_tx,
+            agent_rx: Some(agent_rx),
             add_modal: false,
             add_fields: AddHostFields::default(),
             import_modal: false,
@@ -370,6 +388,18 @@ impl GuiApp {
         self.theme.clone()
     }
 
+    /// 打开主机列表页（tab 形式）：已存在则切换，否则新建。
+    fn open_picker(&mut self) {
+        for (i, t) in self.tabs.iter().enumerate() {
+            if matches!(t, Tab::Picker) {
+                self.active = i;
+                return;
+            }
+        }
+        self.tabs.push(Tab::Picker);
+        self.active = self.tabs.len() - 1;
+    }
+
     /// 重连当前 tab：关闭后按同主机名重新打开（需在主机簿中）。
     fn reconnect_active(&mut self) {
         let title = self
@@ -446,7 +476,7 @@ impl GuiApp {
             return;
         }
         self.split_pending = Some(dir);
-        self.picking = true;
+        self.open_picker();
     }
 
     /// 保存主机簿到 hosts.toml（失败仅告警，不打断 GUI）。
@@ -483,7 +513,7 @@ impl GuiApp {
         }
         if self.tabs.is_empty() {
             self.agent = None;
-            self.picking = true;
+            self.open_picker();
         }
     }
 
@@ -529,11 +559,27 @@ impl GuiApp {
                     if ctrl {
                         match key {
                             egui::Key::T => {
-                                self.picking = true;
+                                self.open_picker();
                                 continue;
                             }
                             egui::Key::W => {
                                 self.close_active();
+                                continue;
+                            }
+                            // Ctrl+1..9：切换到第 N 个 tab（极简模式 tab 栏隐藏时）
+                            k @ (egui::Key::Num1
+                            | egui::Key::Num2
+                            | egui::Key::Num3
+                            | egui::Key::Num4
+                            | egui::Key::Num5
+                            | egui::Key::Num6
+                            | egui::Key::Num7
+                            | egui::Key::Num8
+                            | egui::Key::Num9) => {
+                                let idx = (k as u8 - egui::Key::Num1 as u8) as usize;
+                                if idx < self.tabs.len() {
+                                    self.active = idx;
+                                }
                                 continue;
                             }
                             egui::Key::D if modifiers.shift => {
@@ -582,8 +628,11 @@ impl GuiApp {
         }
         self.agent_open = !self.agent_open;
         if self.agent_open && self.agent.is_none() {
+            // 面板立即打开；Agent 后台构建（keychain 授权弹窗期间 GUI 不卡帧）
             let Tab::Term(ws) = &self.tabs[self.active] else {
-                return; // SFTP 面板不挂 Agent
+                self.agent_error =
+                    Some("当前页不是终端会话，Agent 需要连接终端后才能操作。".into());
+                return;
             };
             let session = &ws.sessions[ws.active];
             let host = session.alias.clone();
@@ -618,35 +667,25 @@ impl GuiApp {
                 Arc::new(ga)
             };
             let mcp_tools = self.mcp_tools.clone();
-            match self
-                .rt
-                .block_on(crate::build_agent(scope, executor, approver, mcp_tools))
-            {
-                Ok(agent) => {
-                    let mut bridge = AgentBridge::new(agent);
-                    if let Some(msgs) = self.restore_msgs.take() {
-                        // 恢复历史：注入 LLM 上下文 + 面板显示
-                        {
-                            let mut a = bridge.agent.try_lock().expect("刚构建无人持锁");
-                            a.restore_history(&msgs);
-                        }
-                        bridge.messages = msgs;
-                        bridge.saved_count = bridge.messages.len();
-                    }
-                    self.agent = Some(bridge);
-                }
-                Err(e) => {
-                    eprintln!("Agent 面板启动失败：{e}");
-                    self.agent_open = false;
-                }
-            }
+            let restore_msgs = self.restore_msgs.take();
+            let tx = self.agent_tx.clone();
+            let rt = self.rt.clone();
+            self.agent_starting = true;
+            self.agent_error = None;
+            rt.spawn(async move {
+                let result = crate::build_agent(scope, executor, approver, mcp_tools).await;
+                tx.send(AgentEvent::AgentBuilt(
+                    result.map_err(|e| e.to_string()),
+                    restore_msgs,
+                ))
+                .ok();
+            });
         }
     }
 }
 
 impl AgentBridge {
-    fn new(agent: AgentLoop) -> Self {
-        let (tx, rx) = mpsc::channel();
+    fn new(agent: AgentLoop, tx: Sender<AgentEvent>, rx: Receiver<AgentEvent>) -> Self {
         let agent = Arc::new(tokio::sync::Mutex::new(agent));
         // 刚构造无人持锁：直接提取共享状态
         let (progress, cancel) = {
@@ -794,8 +833,10 @@ impl AgentBridge {
     }
 
     /// 每帧收取完成的任务 + 刷新实时进度。
-    fn poll(&mut self) {
+    /// 轮询 agent 事件；AgentBuilt 事件返回 outcome 供 GUI 层处理。
+    fn poll(&mut self) -> Option<PollOutcome> {
         self.progress_text = self.progress.try_lock().ok().and_then(|p| p.clone());
+        let mut built: Option<PollOutcome> = None;
         while let Ok(ev) = self.rx.try_recv() {
             match ev {
                 AgentEvent::Turn(Ok(r)) => {
@@ -831,11 +872,23 @@ impl AgentBridge {
                     self.messages
                         .push(("system".into(), format!("🧠 {summary}")));
                 }
+                AgentEvent::AgentBuilt(result, restore_msgs) => {
+                    built = Some(PollOutcome::Built(result, restore_msgs));
+                }
+            }
+            if let Some(b) = built {
+                return Some(b);
             }
             self.save_session();
             self.busy = false;
         }
+        None
     }
+}
+
+/// AgentBridge::poll 的返回：AgentBuilt 事件（GUI 层处理）。
+enum PollOutcome {
+    Built(Result<AgentLoop, String>, Option<Vec<(String, String)>>),
 }
 
 /// SFTP 双栏浏览 UI（本地 | 远程）。
@@ -942,9 +995,33 @@ impl eframe::App for GuiApp {
         // 处理输入（转发 / 快捷键）
         self.handle_input(ctx);
 
-        // Agent 面板任务轮询
+        // Agent 面板任务轮询（AgentBuilt 事件在此处理：赋值 self.agent）
+        let mut outcome = None;
         if let Some(a) = &mut self.agent {
-            a.poll();
+            outcome = a.poll();
+        }
+        if let Some(PollOutcome::Built(result, restore_msgs)) = outcome {
+            self.agent_starting = false;
+            match result {
+                Ok(agent) => {
+                    let tx = self.agent_tx.clone();
+                    let rx = self.agent_rx.take().expect("AgentBridge 接收端已用");
+                    let mut bridge = AgentBridge::new(agent, tx, rx);
+                    if let Some(msgs) = restore_msgs {
+                        // 恢复历史：注入 LLM 上下文 + 面板显示
+                        {
+                            let mut a = bridge.agent.try_lock().expect("刚构建无人持锁");
+                            a.restore_history(&msgs);
+                        }
+                        bridge.messages = msgs;
+                        bridge.saved_count = bridge.messages.len();
+                    }
+                    self.agent = Some(bridge);
+                }
+                Err(e) => {
+                    self.agent_error = Some(e);
+                }
+            }
         }
 
         // 审批轮询：agent 线程发来的确认请求 → 弹窗
@@ -1024,7 +1101,7 @@ impl eframe::App for GuiApp {
                 .show(ctx, |ui| {
                     ui.horizontal(|ui| {
                         if ui.button("+").clicked() {
-                            self.picking = true;
+                            self.open_picker();
                         }
                         if ui
                             .selectable_label(self.agent_open, RichText::new("Agent").strong())
@@ -1060,7 +1137,7 @@ impl eframe::App for GuiApp {
                             }
                         }
                         if ui.button("+").clicked() {
-                            self.picking = true;
+                            self.open_picker();
                         }
                         if let Some(i) = to_activate {
                             self.active = i;
@@ -1115,6 +1192,9 @@ impl eframe::App for GuiApp {
                                 format!("{} · SFTP", p.title),
                                 Color32::from_rgb(90, 160, 200),
                             ),
+                            Tab::Picker => {
+                                ("主机列表".to_string(), Color32::from_rgb(120, 140, 170))
+                            }
                         };
                         ui.label(RichText::new(label).color(color));
                         // 断开时提供重连入口（UI-C）
@@ -1128,22 +1208,31 @@ impl eframe::App for GuiApp {
                     }
                     ui.separator();
                     ui.label(
-                        RichText::new("Ctrl-T 新会话 · Ctrl-a a Agent · Ctrl+Shift+D/E 分屏")
-                            .color(Color32::GRAY),
+                        RichText::new(
+                            "Ctrl-T 新会话 · Ctrl-a a Agent · Ctrl+1-9 切换 · Ctrl+Shift+D/E 分屏",
+                        )
+                        .color(Color32::GRAY),
                     );
+                    if ui
+                        .button(RichText::new("⚙ 设置").small())
+                        .on_hover_text("模型 / 主题 / 外观 / 导入 .itermcolors")
+                        .clicked()
+                    {
+                        self.settings_modal = true;
+                    }
                     if reconnect {
                         self.reconnect_active();
                     }
                 });
             });
 
-        // ── 底部：Agent 面板（唤出式，iTerm2 极简形态：不挤压终端宽度）──
+        // ── 右侧：Agent 面板（侧边栏，Ctrl-a a 唤起）──
         if self.agent_open {
             let panel_bg = self.theme_bg();
-            egui::TopBottomPanel::bottom("agent_panel")
+            egui::SidePanel::right("agent_panel")
                 .resizable(true)
-                .default_height(280.0)
-                .min_height(160.0)
+                .default_width(360.0)
+                .min_width(260.0)
                 .frame(egui::Frame::none().fill(panel_bg))
                 .show(ctx, |ui| {
                     ui.heading("Agent");
@@ -1401,6 +1490,29 @@ impl eframe::App for GuiApp {
                             resp.request_focus();
                         }
                     } else {
+                        // Agent 未就绪：启动中 / 失败信息 / 配置入口（都可见）
+                        if self.agent_starting {
+                            ui.add_space(8.0);
+                            ui.label(
+                                RichText::new("正在启动 Agent…")
+                                    .color(Color32::from_rgb(230, 190, 90)),
+                            );
+                            ui.label(
+                                RichText::new(
+                                    "首次启动会请求 macOS 钥匙串授权（输入登录密码后仅需一次）。",
+                                )
+                                .small()
+                                .color(Color32::GRAY),
+                            );
+                        }
+                        if let Some(err) = &self.agent_error {
+                            ui.add_space(8.0);
+                            ui.label(
+                                RichText::new(format!("Agent 启动失败：{err}"))
+                                    .color(Color32::from_rgb(220, 90, 90)),
+                            );
+                        }
+                        ui.add_space(8.0);
                         ui.label("Agent 未就绪（需配置模型）。");
                         if ui.button("⚙ 配置模型").clicked() {
                             self.settings_modal = true;
@@ -1563,70 +1675,13 @@ impl eframe::App for GuiApp {
                     let rt = self.rt.clone();
                     sftp_ui(&rt, ui, p);
                 }
-                None => {
-                    // 空状态引导（首次使用：新会话 / 添加主机 / 导入 ssh_config）
-                    ui.centered_and_justified(|ui| {
-                        ui.vertical(|ui| {
-                            ui.label(
-                                RichText::new("欢迎使用 ARES")
-                                    .size(22.0)
-                                    .strong()
-                                    .color(self.current_theme().fg),
-                            );
-                            ui.add_space(8.0);
-                            ui.label(
-                                RichText::new("极简 iTerm2 式 AI 运维终端 · 纯 Rust")
-                                    .color(Color32::GRAY),
-                            );
-                            ui.add_space(16.0);
-                            let mut act: Option<&str> = None;
-                            ui.horizontal(|ui| {
-                                if ui.button("🖥 新会话").clicked() {
-                                    act = Some("new");
-                                }
-                                if ui.button("➕ 添加主机").clicked() {
-                                    act = Some("add");
-                                }
-                                if ui.button("📥 从 ssh_config 导入").clicked() {
-                                    act = Some("import");
-                                }
-                            });
-                            ui.add_space(8.0);
-                            ui.label(
-                                RichText::new(
-                                    "快捷键：Ctrl-T 新会话 · Ctrl-a a Agent · Ctrl+Shift+D/E 分屏",
-                                )
-                                .small()
-                                .color(Color32::GRAY),
-                            );
-                            match act {
-                                Some("new") => {
-                                    self.picking = true;
-                                }
-                                Some("add") => {
-                                    self.add_modal = true;
-                                }
-                                Some("import") => {
-                                    self.import_modal = true;
-                                }
-                                _ => {}
-                            }
-                        });
-                    });
-                }
-            }
-        });
-
-        // ── 主机选择弹窗 ──
-        if self.picking {
-            let mut close = false;
-            let mut open_add = false;
-            let mut open_import = false;
-            egui::Window::new("选择主机")
-                .default_size([460.0, 440.0])
-                .collapsible(false)
-                .resizable(true)
-                .show(ctx, |ui| {
+                Some(Tab::Picker) => {
+                    // 主机列表页（tab 形式，极简；连接后自动切到终端 tab）
+                    let mut open_add = false;
+                    let mut open_import = false;
+                    let mut open_local = false;
+                    let mut connect_key: Option<String> = None;
+                    let mut sftp_key: Option<String> = None;
                     ui.horizontal(|ui| {
                         ui.label(
                             RichText::new(format!("{} 台主机（hosts.toml）", self.hosts.len()))
@@ -1639,8 +1694,7 @@ impl eframe::App for GuiApp {
                             open_import = true;
                         }
                         if ui.button("🖥 本地终端").clicked() {
-                            self.open_local_tab();
-                            close = true;
+                            open_local = true;
                         }
                     });
                     ui.add(
@@ -1688,8 +1742,7 @@ impl eframe::App for GuiApp {
                                 let row =
                                     ui.selectable_label(self.filter_selected == Some(idx), label);
                                 if row.double_clicked() {
-                                    self.open_tab(key);
-                                    close = true;
+                                    connect_key = Some(key.clone());
                                     break;
                                 }
                                 if row.clicked() {
@@ -1712,35 +1765,86 @@ impl eframe::App for GuiApp {
                             && self.filter_selected.is_some()
                             && self.filter_selected.unwrap() < vis.len()
                         {
-                            let key = vis[self.filter_selected.unwrap()].1.clone();
-                            self.open_tab(&key);
-                            close = true;
+                            connect_key = Some(vis[self.filter_selected.unwrap()].1.clone());
                         }
                         let sftp = ui.button("SFTP 浏览").clicked();
                         if sftp
                             && self.filter_selected.is_some()
                             && self.filter_selected.unwrap() < vis.len()
                         {
-                            let key = vis[self.filter_selected.unwrap()].1.clone();
-                            self.open_sftp_tab(&key);
-                            close = true;
-                        }
-                        if ui.button("取消").clicked() {
-                            close = true;
+                            sftp_key = Some(vis[self.filter_selected.unwrap()].1.clone());
                         }
                     });
-                });
-            if open_add {
-                self.add_modal = true;
+                    if open_add {
+                        self.add_modal = true;
+                    }
+                    if open_import {
+                        self.import_modal = true;
+                        self.import_selected.clear();
+                    }
+                    if open_local {
+                        self.open_local_tab();
+                    }
+                    if let Some(k) = connect_key {
+                        self.open_tab(&k);
+                    }
+                    if let Some(k) = sftp_key {
+                        self.open_sftp_tab(&k);
+                    }
+                }
+                None => {
+                    // 空状态引导（首次使用：新会话 / 添加主机 / 导入 ssh_config）
+                    ui.centered_and_justified(|ui| {
+                        ui.vertical(|ui| {
+                            ui.label(
+                                RichText::new("欢迎使用 ARES")
+                                    .size(22.0)
+                                    .strong()
+                                    .color(self.current_theme().fg),
+                            );
+                            ui.add_space(8.0);
+                            ui.label(
+                                RichText::new("极简 iTerm2 式 AI 运维终端 · 纯 Rust")
+                                    .color(Color32::GRAY),
+                            );
+                            ui.add_space(16.0);
+                            let mut act: Option<&str> = None;
+                            ui.horizontal(|ui| {
+                                if ui.button("🖥 新会话").clicked() {
+                                    act = Some("new");
+                                }
+                                if ui.button("➕ 添加主机").clicked() {
+                                    act = Some("add");
+                                }
+                                if ui.button("📥 从 ssh_config 导入").clicked() {
+                                    act = Some("import");
+                                }
+                            });
+                            ui.add_space(8.0);
+                            ui.label(
+                                RichText::new(
+                                    "快捷键：Ctrl-T 新会话 · Ctrl-a a Agent · Ctrl+Shift+D/E 分屏",
+                                )
+                                .small()
+                                .color(Color32::GRAY),
+                            );
+                            match act {
+                                Some("new") => {
+                                    self.open_picker();
+                                }
+                                Some("add") => {
+                                    self.add_modal = true;
+                                }
+                                Some("import") => {
+                                    self.import_modal = true;
+                                }
+                                _ => {}
+                            }
+                        });
+                    });
+                }
             }
-            if open_import {
-                self.import_modal = true;
-                self.import_selected.clear();
-            }
-            if close {
-                self.picking = false;
-            }
-        }
+        });
 
         // ── 添加主机弹窗 ──
         if self.add_modal {
