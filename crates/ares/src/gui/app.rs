@@ -632,7 +632,7 @@ impl GuiApp {
                                     let sc = s.screen();
                                     sc.size()
                                 };
-                                let mut out = vec![
+                                let out = vec![
                                     0x1b,
                                     b'M',
                                     32 + btn,
@@ -1123,7 +1123,7 @@ fn mouse_send(ws: &TermWorkspace, btn: u8, col: u16, row: u16, _press: bool) {
     if col >= 223 || row >= 223 {
         return; // X10 编码上限
     }
-    let mut out = vec![
+    let out = vec![
         0x1b,
         b'M',
         32 + btn,
