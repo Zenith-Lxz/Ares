@@ -316,6 +316,7 @@ impl GpuTerminalRenderer {
     }
 
     /// 重建一行：扫描 cells → 段（fg/bg/font 分组）→ shaping → atlas → RowGlyph。
+    #[allow(clippy::too_many_arguments)]
     fn build_row(
         &mut self,
         screen: &vt100::Screen,
@@ -358,7 +359,7 @@ impl GpuTerminalRenderer {
                 b => Some(color_of(b, theme)),
             };
             if is_cursor_row && c == cursor.1 && cursor_style == "block" && !blink_off {
-                std::mem::swap(&mut fg, &mut bg.get_or_insert(theme.cursor));
+                let _ = std::mem::swap(&mut fg, bg.get_or_insert(theme.cursor));
                 // 反色：fg=原 bg，bg=原 fg
                 if let Some(b) = &mut bg {
                     *b = color_of(cell.fgcolor(), theme);
