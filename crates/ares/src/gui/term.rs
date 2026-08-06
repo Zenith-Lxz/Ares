@@ -407,7 +407,7 @@ fn draw_text_segment(
         }
         // 普通余段
         let part = &text[i..];
-        x += paint_plain(painter, egui::pos2(x, pos.y), part, lay, fg);
+        paint_plain(painter, egui::pos2(x, pos.y), part, lay, fg);
         break;
     }
 }

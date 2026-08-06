@@ -309,13 +309,10 @@ fn parse_kitty_images(
                     let is_continue = params.contains(",m=1") || params.ends_with("m=1");
                     let is_transmit = params.starts_with("a=T") || params.starts_with("a=t");
                     if is_transmit {
-                        static mut KITTY_B64: Vec<u8> = Vec::new();
-                        // 安全：读线程唯一访问
-                        let acc = unsafe { &mut KITTY_B64 };
-                        acc.extend_from_slice(payload);
+                        kitty_b64.extend_from_slice(payload);
                         if !is_continue {
                             if let Ok(data) =
-                                base64::engine::general_purpose::STANDARD.decode(&acc[..])
+                                base64::engine::general_purpose::STANDARD.decode(&kitty_b64[..])
                             {
                                 let (row, col) = {
                                     let p = parser.lock().unwrap();
@@ -323,7 +320,7 @@ fn parse_kitty_images(
                                 };
                                 images.lock().unwrap().push(InlineImage { row, col, data });
                             }
-                            acc.clear();
+                            kitty_b64.clear();
                         }
                     }
                     pos = payload_end + 2;
