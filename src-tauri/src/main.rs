@@ -4,6 +4,19 @@
 use ares::commands::AppState;
 
 fn main() {
+    // SSH_ASKPASS 子命令：与主仓库 `ares vault-get` 同构。
+    // askpass 脚本用 current_exe() 生成（pty/session.rs），运行时必须是本二进制，
+    // 否则认证阶段拿不到密码（表现：握手成功后被服务器 Connection closed）。
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("vault-get") {
+        if let Some(alias) = args.get(2) {
+            if let Some(secret) = ares::vault::get(alias) {
+                print!("{secret}");
+                return;
+            }
+        }
+        std::process::exit(1);
+    }
     tauri::Builder::default()
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
@@ -12,6 +25,7 @@ fn main() {
             ares::commands::session::session_write,
             ares::commands::session::session_resize,
             ares::commands::session::session_close,
+            ares::commands::session::session_provide_password,
             ares::commands::session::session_list,
             ares::commands::guard::command_check,
             ares::commands::guard::command_authorize,

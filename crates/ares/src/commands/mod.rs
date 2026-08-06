@@ -20,7 +20,8 @@ pub type CmdError = String;
 /// Phase 1：sessions 池真实可用（Phase 2 直接接），agent 为占位。
 #[derive(Default)]
 pub struct AppState {
-    pub sessions: std::sync::Mutex<std::collections::HashMap<u32, crate::pty::Session>>,
+    /// 会话池（Phase 3 多会话有序遍历）
+    pub sessions: std::sync::Mutex<std::collections::BTreeMap<u32, crate::pty::Session>>,
     pub next_id: std::sync::Mutex<u32>,
     /// Agent 句柄占位（Phase 4 接 ares-agent）
     pub agent: std::sync::Mutex<Option<serde_json::Value>>,

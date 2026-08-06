@@ -39,8 +39,8 @@ pub struct Session {
     /// 主机别名（SSH）或 None（本地）
     host_alias: Option<String>,
     pair: portable_pty::PtyPair,
-    writer: Box<dyn Write + Send>,
-    child: Option<Box<dyn portable_pty::Child + Send + Sync>>,
+    writer: std::sync::Mutex<Box<dyn Write + Send>>,
+    child: std::sync::Mutex<Option<Box<dyn portable_pty::Child + Send + Sync>>>,
 }
 
 impl Session {
@@ -60,13 +60,14 @@ impl Session {
         });
         let child = pair.slave.spawn_command(cmd)?;
         let writer = pair.master.take_writer()?;
+        eprintln!("[pty#{id}] local session created");
         Ok(Session {
             id,
             kind: SessionKind::Local,
             host_alias: None,
             pair,
-            writer,
-            child: Some(child),
+            writer: std::sync::Mutex::new(writer),
+            child: std::sync::Mutex::new(Some(child)),
         })
     }
 
@@ -75,6 +76,7 @@ impl Session {
     pub fn spawn_ssh(
         target: &str,
         alias: &str,
+        port: u16,
         cols: u16,
         rows: u16,
         id: SessionId,
@@ -90,6 +92,10 @@ impl Session {
         let mut cmd = CommandBuilder::new("ssh");
         // 连接加固参数（与 gui/session.rs 一致：-t 缺失会非交互；accept-new 免 host key 卡点）
         cmd.arg("-t");
+        if port != 22 {
+            cmd.arg("-p");
+            cmd.arg(port.to_string());
+        }
         cmd.arg("-o");
         cmd.arg("StrictHostKeyChecking=accept-new");
         cmd.arg("-o");
@@ -109,13 +115,14 @@ impl Session {
 
         let child = pair.slave.spawn_command(cmd)?;
         let writer = pair.master.take_writer()?;
+        eprintln!("[pty#{id}] ssh session created ({target}, port {port})");
         Ok(Session {
             id,
             kind: SessionKind::Ssh,
             host_alias: Some(alias.to_string()),
             pair,
-            writer,
-            child: Some(child),
+            writer: std::sync::Mutex::new(writer),
+            child: std::sync::Mutex::new(Some(child)),
         })
     }
 
@@ -178,9 +185,10 @@ impl Session {
         Ok(())
     }
 
-    pub fn write(&mut self, data: &str) -> Result<()> {
-        self.writer.write_all(data.as_bytes())?;
-        self.writer.flush()?;
+    pub fn write(&self, data: &str) -> Result<()> {
+        let mut w = self.writer.lock().unwrap();
+        w.write_all(data.as_bytes())?;
+        w.flush()?;
         Ok(())
     }
 
@@ -196,8 +204,8 @@ impl Session {
             .map_err(|e| anyhow::anyhow!(e.to_string()))
     }
 
-    pub fn kill(&mut self) {
-        if let Some(c) = self.child.as_mut() {
+    pub fn kill(&self) {
+        if let Some(c) = self.child.lock().unwrap().as_mut() {
             let _ = c.kill();
         }
     }

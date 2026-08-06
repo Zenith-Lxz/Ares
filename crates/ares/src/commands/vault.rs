@@ -8,18 +8,18 @@ use tauri::State;
 use super::AppState;
 use super::CmdError;
 
-/// 凭据存在性。Phase 1 mock：false。
+/// 凭据存在性（前端只允许问「有没有」，不允许读值）。
 #[tauri::command]
-pub async fn vault_has(_state: State<'_, AppState>, _alias: String) -> Result<bool, CmdError> {
-    Ok(false)
+pub async fn vault_has(_state: State<'_, AppState>, alias: String) -> Result<bool, CmdError> {
+    Ok(crate::vault::get(&format!("ssh-pw:{alias}")).is_some())
 }
 
-/// 写入凭据。Phase 1 mock：接受即成功。
+/// 写入凭据。
 #[tauri::command]
 pub async fn vault_set(
     _state: State<'_, AppState>,
-    _alias: String,
-    _secret: String,
+    alias: String,
+    secret: String,
 ) -> Result<(), CmdError> {
-    Ok(())
+    crate::vault::set(&format!("ssh-pw:{alias}"), &secret).map_err(|e| e.to_string())
 }
