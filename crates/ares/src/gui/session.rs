@@ -30,6 +30,15 @@ pub struct Session {
     pub connected: Arc<Mutex<bool>>,
     /// 滚动回退偏移（行数；0=正常视图）。scrollback 容量 10000 行。
     pub scroll: Arc<Mutex<usize>>,
+    /// Kitty 图形协议内联图片（M6）：按接收完成时的光标位置放置。
+    pub images: Arc<Mutex<Vec<InlineImage>>>,
+}
+
+/// Kitty 协议内联图片（渲染时解码）。
+pub struct InlineImage {
+    pub row: u16,
+    pub col: u16,
+    pub data: Vec<u8>,
 }
 
 impl Session {
@@ -128,12 +137,15 @@ impl Session {
         let exited = Arc::new(Mutex::new(false));
         let connected = Arc::new(Mutex::new(false));
         let scroll = Arc::new(Mutex::new(0usize));
+        let images = Arc::new(Mutex::new(Vec::<InlineImage>::new()));
 
         // 读线程：pty 输出 → vt100 解析（每批数据后通知 GUI 重画）
         // repaint 节流 30fps：高频输出（top/日志）不触发每批重画（M4）
         let last_repaint = Arc::new(Mutex::new(std::time::Instant::now()));
+        let mut kitty_b64: Vec<u8> = Vec::new();
         {
             let last_repaint = last_repaint.clone();
+            let images_r = images.clone();
             let parser = Arc::clone(&parser);
             let exited = Arc::clone(&exited);
             let connected = Arc::clone(&connected);
@@ -144,6 +156,9 @@ impl Session {
                         Ok(0) | Err(_) => break,
                         Ok(n) => {
                             *connected.lock().unwrap() = true;
+                            // Kitty 图形协议解析（M6）：_G params;base64 \
+                            // （vt100 忽略未知 OSC，解析独立于渲染管线）
+                            parse_kitty_images(&buf[..n], &parser, &images_r, &mut kitty_b64);
                             if let Ok(mut p) = parser.lock() {
                                 p.process(&buf[..n]);
                             }
@@ -171,6 +186,7 @@ impl Session {
             _child: Arc::new(Mutex::new(child)),
             exited,
             scroll,
+            images,
         })
     }
 
@@ -266,6 +282,56 @@ impl Session {
         *sc = 0;
         let mut p = self.parser.lock().unwrap();
         p.set_scrollback(0);
+    }
+}
+
+/// 解析 Kitty 图形协议（M6）：完整图 → 记录到 images（光标位置放置）。
+/// 支持分片（m=1 续片）累积；base64 解码；只取 a=T（transmit）。
+fn parse_kitty_images(
+    buf: &[u8],
+    parser: &Arc<Mutex<vt100::Parser>>,
+    images: &Arc<Mutex<Vec<InlineImage>>>,
+    kitty_b64: &mut Vec<u8>,
+) {
+    use base64::Engine;
+    let mut pos = 0usize;
+    while pos + 2 <= buf.len() {
+        if buf[pos] == 0x1b && buf[pos + 1] == b'G' {
+            if let Some(semi) = buf[pos + 2..].iter().position(|&b| b == b';') {
+                let params = String::from_utf8_lossy(&buf[pos + 2..pos + 2 + semi]).to_string();
+                let payload_start = pos + 2 + semi + 1;
+                if let Some(end) = buf[payload_start..]
+                    .windows(2)
+                    .position(|w| w == [0x1b, b'\\'])
+                {
+                    let payload_end = payload_start + end;
+                    let payload = &buf[payload_start..payload_end];
+                    let is_continue = params.contains(",m=1") || params.ends_with("m=1");
+                    let is_transmit = params.starts_with("a=T") || params.starts_with("a=t");
+                    if is_transmit {
+                        static mut KITTY_B64: Vec<u8> = Vec::new();
+                        // 安全：读线程唯一访问
+                        let acc = unsafe { &mut KITTY_B64 };
+                        acc.extend_from_slice(payload);
+                        if !is_continue {
+                            if let Ok(data) =
+                                base64::engine::general_purpose::STANDARD.decode(&acc[..])
+                            {
+                                let (row, col) = {
+                                    let p = parser.lock().unwrap();
+                                    p.screen().cursor_position()
+                                };
+                                images.lock().unwrap().push(InlineImage { row, col, data });
+                            }
+                            acc.clear();
+                        }
+                    }
+                    pos = payload_end + 2;
+                    continue;
+                }
+            }
+        }
+        pos += 1;
     }
 }
 

@@ -148,6 +148,7 @@ pub fn draw_terminal(
     selection: Option<&SelectRange>,
     cursor_style: &str,
     cursor_blink: bool,
+    images: &[(u16, u16, Vec<u8>)],
 ) -> (u16, u16) {
     let (rows, cols) = screen.size();
     let painter = ui.painter();
@@ -167,10 +168,50 @@ pub fn draw_terminal(
         font: font.clone(),
     };
 
+    // 内联图片（M6）：解码 → texture → 绘制；记录遮挡区（图片覆盖的 cell 不再画）
+    let mut blocked: Vec<std::collections::HashSet<u16>> =
+        vec![std::collections::HashSet::new(); rows as usize];
+    for (irow, icol, data) in images {
+        let img = match image::load_from_memory(data.as_slice()) {
+            Ok(img) => img.to_rgba8(),
+            Err(_) => continue,
+        };
+        let (w, h) = (img.width(), img.height());
+        let w_cells = (w as f32 / cell_w).ceil().max(1.0) as u16;
+        let h_cells = (h as f32 / cell_h).ceil().max(1.0) as u16;
+        if *irow >= rows || *icol >= cols {
+            continue;
+        }
+        let tex = ui.ctx().load_texture(
+            format!("inline-{irow}-{icol}"),
+            egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], img.as_raw()),
+            egui::TextureOptions::LINEAR,
+        );
+        let pos = pos2(
+            origin.x + *icol as f32 * cell_w,
+            origin.y + *irow as f32 * cell_h,
+        );
+        let rect = Rect::from_min_size(
+            pos,
+            Vec2::new(w_cells as f32 * cell_w, h_cells as f32 * cell_h),
+        );
+        painter.image(
+            tex.id(),
+            rect,
+            Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+            Color32::WHITE,
+        );
+        for br in *irow..(*irow + h_cells).min(rows) {
+            for bc in *icol..(*icol + w_cells).min(cols) {
+                blocked[br as usize].insert(bc);
+            }
+        }
+    }
+
     // egui 即时模式：每帧全画（上一帧不保留）。静止时由数据驱动
     // repaint 控制（读线程无数据不触发重画 → egui 不重画帧 → 画面保留）。
     for r in 0..rows {
-        draw_row(painter, screen, r, cols, &lay, theme, selection);
+        draw_row(painter, screen, r, cols, &lay, theme, selection, &blocked);
     }
 
     // 光标（M3）：block / beam / underline，可选闪烁（0.5s 周期）
@@ -231,6 +272,7 @@ struct RowLayout {
 }
 
 /// 一行内按「同色连续段」合并绘制（减少 text 调用）。
+#[allow(clippy::too_many_arguments)]
 fn draw_row(
     painter: &egui::Painter,
     screen: &vt100::Screen,
@@ -239,11 +281,15 @@ fn draw_row(
     lay: &RowLayout,
     theme: &Theme,
     selection: Option<&SelectRange>,
+    blocked: &[std::collections::HashSet<u16>],
 ) {
     let base_y = lay.origin.y + r as f32 * lay.cell_h;
     // 段：(起始列, 文本, 前景色)
     let mut segments: Vec<(u16, String, Color32)> = Vec::new();
     for c in 0..cols {
+        if blocked.get(r as usize).map_or(false, |s| s.contains(&c)) {
+            continue; // 图片遮挡区（M6）
+        }
         let Some(cell) = screen.cell(r, c) else {
             continue;
         };

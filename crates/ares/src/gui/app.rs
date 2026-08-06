@@ -1750,6 +1750,10 @@ impl eframe::App for GuiApp {
                             self.last_resize = std::time::Instant::now();
                         }
                         let screen = ws.sessions[0].screen();
+                        let imgs: Vec<(u16, u16, Vec<u8>)> = {
+                            let im = ws.sessions[0].images.lock().unwrap();
+                            im.iter().map(|g| (g.row, g.col, g.data.clone())).collect()
+                        };
                         term::draw_terminal(
                             ui,
                             &screen,
@@ -1758,6 +1762,7 @@ impl eframe::App for GuiApp {
                             ws.selection.as_ref(),
                             &self.settings.cursor_style,
                             self.settings.cursor_blink,
+                            &imgs,
                         );
                         // 鼠标交互：拖选复制 + 点击清焦点（M2）
                         let tr = ui.available_rect_before_wrap();
@@ -1814,6 +1819,10 @@ impl eframe::App for GuiApp {
                             } else {
                                 None
                             };
+                            let imgs: Vec<(u16, u16, Vec<u8>)> = {
+                                let im = s.images.lock().unwrap();
+                                im.iter().map(|g| (g.row, g.col, g.data.clone())).collect()
+                            };
                             term::draw_terminal(
                                 &mut child,
                                 &screen,
@@ -1822,6 +1831,7 @@ impl eframe::App for GuiApp {
                                 sel,
                                 &self.settings.cursor_style,
                                 self.settings.cursor_blink,
+                                &imgs,
                             );
                         }
                         // 分割线
