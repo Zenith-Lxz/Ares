@@ -262,7 +262,7 @@ impl GpuTerminalRenderer {
         let mut verts: Vec<Vert> = Vec::with_capacity(rows as usize * 64 * 4);
         for glyphs in self.row_glyphs.iter() {
             for g in glyphs {
-                push_quad(&mut verts, g, rect, phys_w, phys_h, self.scale);
+                push_quad(&mut verts, g, phys_w, phys_h, self.scale);
             }
         }
         if !verts.is_empty() {
@@ -637,14 +637,7 @@ fn raster_glyph(
 }
 
 /// 压入一个 quad 的 4 个顶点（NDC 转换）。
-fn push_quad(
-    verts: &mut Vec<Vert>,
-    g: &RowGlyph,
-    rect: Rect,
-    phys_w: u32,
-    phys_h: u32,
-    scale: f32,
-) {
+fn push_quad(verts: &mut Vec<Vert>, g: &RowGlyph, phys_w: u32, phys_h: u32, scale: f32) {
     // 逻辑像素 → 物理像素 → NDC
     let x0 = g.x * scale; // 相对区域原点（逻辑 → 物理）
     let y0 = g.y * scale;
