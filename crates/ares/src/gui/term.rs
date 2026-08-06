@@ -427,10 +427,8 @@ fn paint_plain(
     w
 }
 
-/// 从 ui 区域推导终端行列数（等宽字体）。
-pub fn size_for(ui: &egui::Ui, font: &FontId) -> (u16, u16) {
-    let cell_w = ui.fonts(|f| f.glyph_width(font, 'M'));
-    let cell_h = ui.fonts(|f| f.row_height(font));
+/// 从 ui 区域推导终端行列数（cell 尺寸由调用方给定，统一来自渲染器 ideal_cell_size）。
+pub fn size_for(ui: &egui::Ui, cell_w: f32, cell_h: f32) -> (u16, u16) {
     let area = ui.available_size();
     let cols = (area.x / cell_w.max(1.0)).floor().max(20.0) as u16;
     let rows = (area.y / cell_h.max(1.0)).floor().max(5.0) as u16;

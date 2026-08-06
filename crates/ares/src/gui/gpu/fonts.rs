@@ -121,7 +121,23 @@ impl FontSet {
         }
     }
 
-    /// 文本段 shaping（连字等宽字体）；返回 (glyph_id, x_advance_units)。
+    /// 理想 cell 尺寸（逻辑像素）—— 唯一权威来源。
+    /// 宽 = Fira Code 等宽 advance（0.615em），高 = 1.2× 字号（终端标准行高）。
+    /// app.rs 的 size_for 与渲染器共用此值，消除双 cell_w（Hack vs Fira 2.5% 偏差）。
+    pub fn ideal_cell_size(font_size: f32) -> (f32, f32) {
+        use std::sync::OnceLock;
+        static FS: OnceLock<FontSet> = OnceLock::new();
+        let fs = FS.get_or_init(FontSet::new);
+        let upem = fs.fira_swash.metrics(&[]).units_per_em as f32;
+        let adv = fs
+            .shape(FontKind::Mono, "M")
+            .first()
+            .map(|(_, a)| *a as f32)
+            .unwrap_or(1200.0);
+        (font_size * adv / upem, font_size * 1.2)
+    }
+
+    /// 文本段 shaping（等宽字体度量用；渲染已改为逐 cell，不再用 shaping 推进）。
     pub fn shape(&self, kind: FontKind, text: &str) -> Vec<(u16, i32)> {
         let Some(face) = self.face_for(kind) else {
             return Vec::new();

@@ -44,6 +44,8 @@ struct RowGlyph {
 /// 文本段（连续同 fg/bg/字体 的 cells）。
 struct Seg {
     start: u16,
+    /// 本段占用的终端列数（宽字符 +2，窄字符 +1；背景/下划线宽度依据）
+    cols: u16,
     text: String,
     fg: Color32,
     bg: Option<Color32>,
@@ -396,6 +398,15 @@ impl GpuTerminalRenderer {
                 continue;
             }
             let kind = self.fonts.char_kind(contents.chars().next().unwrap_or(' '));
+            // 单元格宽度：宽字符 2 列，窄字符 1 列（unicode-width，替代硬编码区间）
+            let w_cells = contents
+                .chars()
+                .next()
+                .map(|ch| {
+                    use unicode_width::UnicodeWidthChar;
+                    ch.width().unwrap_or(1).max(1) as u16
+                })
+                .unwrap_or(1);
             let prev = segs.last_mut();
             if let Some(p) = prev {
                 if p.fg == fg
@@ -405,12 +416,14 @@ impl GpuTerminalRenderer {
                     && p.underline == cell.underline()
                 {
                     p.text.push_str(&contents);
+                    p.cols += w_cells;
                     c += 1;
                     continue;
                 }
             }
             segs.push(Seg {
                 start: c,
+                cols: w_cells,
                 text: contents,
                 fg,
                 bg,
@@ -428,7 +441,7 @@ impl GpuTerminalRenderer {
                 out.push(RowGlyph {
                     x,
                     y: 0.0,
-                    w: s.text.chars().count() as f32 * cell_w,
+                    w: s.cols as f32 * cell_w,
                     h: cell_h,
                     uv: self.white_px,
                     color: to_rgba(bg),
@@ -468,56 +481,58 @@ impl GpuTerminalRenderer {
         out
     }
 
-    /// 普通文本段 shaping + 栅格化（连字/Fira/CJK）。
+    /// 普通文本段：逐 cell 绘制字形（终端网格模型，非文本排版）。
+    /// 铁律：字形必须落在 col × cell_w 的 slot 内，slot 内居中；
+    /// 不用字体 advance 累加推进（CJK advance≈1.0em ≠ 2×cell_w 必然累积错位）。
+    /// 本轮砍掉 shaping/连字（运维终端不需要；组合字符/ZWJ 坑提前消失）。
     fn push_shaped(&mut self, out: &mut Vec<RowGlyph>, s: &Seg, cell_w: f32, cell_h: f32) {
-        let upem = match s.kind {
-            FontKind::Cjk => self.fonts.cjk.as_ref().map(|f| f.units_per_em() as f32),
-            _ => Some(self.fonts.fira.units_per_em() as f32),
-        };
-        let Some(upem) = upem else { return };
-        let px = (cell_h * self.scale).round().max(4.0);
-        let scale_px = px / upem;
-        let glyphs = self.fonts.shape(s.kind, &s.text);
         let (font_id, swash_font) = match s.kind {
             FontKind::Cjk => (FONT_CJK, self.fonts.cjk_swash.as_ref()),
             _ => (FONT_FIRA, Some(&self.fonts.fira_swash)),
         };
         let Some(swash_font) = swash_font else { return };
+        let px = (cell_h * self.scale).round().max(4.0);
         let y_base = self.fonts.baseline_ratio(s.kind) * cell_h;
-        let mut x = s.start as f32 * cell_w;
-        for (gid, advance) in glyphs {
-            let w_px = advance as f32 * scale_px;
-            if w_px <= 0.0 {
-                continue;
-            }
-            // 真实位图尺寸 + placement 偏移（不拉伸，字形原样绘制）
-            if let Some((gw, gh, lx, ty, rgba)) =
-                raster_glyph(&mut self.raster, swash_font, gid, px)
-            {
-                if let Some(rect) = self
-                    .atlas
-                    .get_or_insert(font_id, gid, px as u32, gw, gh, &rgba)
+        let mut col = s.start as f32;
+        for ch in s.text.chars() {
+            use unicode_width::UnicodeWidthChar;
+            let w_cells = ch.width().unwrap_or(1).max(1) as f32;
+            let slot_w = w_cells * cell_w;
+            let gid = swash_font.charmap().map(ch);
+            if gid != 0 {
+                if let Some((gw, gh, _lx, ty, rgba)) =
+                    raster_glyph(&mut self.raster, swash_font, gid, px)
                 {
-                    let uv = atlas::rect_to_uv(&rect, 2048.0);
-                    out.push(RowGlyph {
-                        x: x + lx as f32 / self.scale,
+                    if let Some(rect) = self
+                        .atlas
+                        .get_or_insert(font_id, gid, px as u32, gw, gh, &rgba)
+                    {
+                        let uv = atlas::rect_to_uv(&rect, 2048.0);
+                        // slot 内居中；位图超出 slot 时等比缩小（不溢出到邻格）
+                        let draw_w = (gw as f32 / self.scale).min(slot_w);
+                        let draw_h = gh as f32 / self.scale;
+                        let x = col * cell_w + (slot_w - draw_w) * 0.5;
                         // FreeType 语义：bitmap_top 正值 = 位图顶部在基线上方
-                        y: y_base - ty as f32 / self.scale,
-                        w: gw as f32 / self.scale,
-                        h: gh as f32 / self.scale,
-                        uv,
-                        color: to_rgba(s.fg),
-                    });
+                        let y = y_base - ty as f32 / self.scale;
+                        out.push(RowGlyph {
+                            x,
+                            y,
+                            w: draw_w,
+                            h: draw_h,
+                            uv,
+                            color: to_rgba(s.fg),
+                        });
+                    }
                 }
             }
-            x += w_px / self.scale;
+            col += w_cells;
         }
-        // 下划线
+        // 下划线（宽度按列跨度）
         if s.underline {
             out.push(RowGlyph {
                 x: s.start as f32 * cell_w,
                 y: cell_h - 1.5,
-                w: s.text.chars().count() as f32 * cell_w,
+                w: s.cols as f32 * cell_w,
                 h: 1.5,
                 uv: self.white_px,
                 color: to_rgba(s.fg),
@@ -525,50 +540,66 @@ impl GpuTerminalRenderer {
         }
     }
 
-    /// 彩色 emoji：swash 彩色位图直接入 atlas。
+    /// 彩色 emoji：swash 彩色位图直接入 atlas。每字符按显示宽度占格（宽 emoji 2 格），
+    /// 绘制区域 = 宽度 × cell_w，slot 内居中（不按 1 格硬推进）。
     fn push_emoji(&mut self, out: &mut Vec<RowGlyph>, s: &Seg, cell_w: f32, cell_h: f32) {
         let Some(swash_font) = &self.fonts.emoji_swash else {
             return;
         };
         let px = (cell_h * self.scale).round().max(8.0);
         let mut scaler = self.raster.builder(*swash_font).size(px).build();
-        let mut x = s.start as f32 * cell_w;
+        let mut col = s.start as f32;
         for ch in s.text.chars() {
+            use unicode_width::UnicodeWidthChar;
+            let w_cells = ch.width().unwrap_or(2).max(1) as f32;
+            let slot_w = w_cells * cell_w;
             let gid = swash_font.charmap().map(ch);
-            if gid == 0 {
-                x += cell_w;
-                continue;
-            };
-            if let Some(bitmap) = scaler.scale_color_bitmap(gid, swash::scale::StrikeWith::BestFit)
-            {
-                let (gw, gh) = (bitmap.placement.width, bitmap.placement.height);
-                if gw > 0 && gh > 0 {
-                    let rgba: Vec<u8> = bitmap
-                        .data
-                        .chunks(4)
-                        .flat_map(|p| [p[0], p[1], p[2], p[3]])
-                        .collect();
-                    if let Some(rect) = self
-                        .atlas
-                        .get_or_insert(FONT_EMOJI, gid, px as u32, gw, gh, &rgba)
-                    {
-                        let uv = atlas::rect_to_uv(&rect, 2048.0);
-                        // 按位图真实尺寸绘制（不拉伸），垂直按基线对齐
-                        let y_base = cell_h * 0.78;
-                        out.push(RowGlyph {
-                            x: x + bitmap.placement.left as f32 / self.scale,
-                            // FreeType 语义：bitmap_top 正值 = 位图顶部在基线上方
-                            y: y_base - bitmap.placement.top as f32 / self.scale,
-                            w: gw as f32 / self.scale,
-                            h: gh as f32 / self.scale,
-                            uv,
-                            color: [1.0, 1.0, 1.0, 1.0],
-                        });
+            if gid != 0 {
+                if let Some(bitmap) =
+                    scaler.scale_color_bitmap(gid, swash::scale::StrikeWith::BestFit)
+                {
+                    let (gw, gh) = (bitmap.placement.width, bitmap.placement.height);
+                    if gw > 0 && gh > 0 {
+                        let rgba: Vec<u8> = bitmap
+                            .data
+                            .chunks(4)
+                            .flat_map(|p| [p[0], p[1], p[2], p[3]])
+                            .collect();
+                        if let Some(rect) = self
+                            .atlas
+                            .get_or_insert(FONT_EMOJI, gid, px as u32, gw, gh, &rgba)
+                        {
+                            let uv = atlas::rect_to_uv(&rect, 2048.0);
+                            // slot 内居中；位图超出 slot 等比缩小
+                            let draw_w = (gw as f32 / self.scale).min(slot_w);
+                            let draw_h = gh as f32 / self.scale;
+                            let x = col * cell_w + (slot_w - draw_w) * 0.5;
+                            let y_base = cell_h * 0.78;
+                            out.push(RowGlyph {
+                                x,
+                                // FreeType 语义：bitmap_top 正值 = 位图顶部在基线上方
+                                y: y_base - bitmap.placement.top as f32 / self.scale,
+                                w: draw_w,
+                                h: draw_h,
+                                uv,
+                                color: [1.0, 1.0, 1.0, 1.0],
+                            });
+                        }
                     }
                 }
             }
-            x += cell_w;
+            col += w_cells;
         }
+    }
+
+    /// 测试辅助：最近一次 render 的行 glyph（r, x, y, w）。位置断言用。
+    #[allow(dead_code)]
+    pub fn test_glyphs(&self) -> Vec<(usize, f32, f32, f32)> {
+        self.row_glyphs
+            .iter()
+            .enumerate()
+            .flat_map(|(r, gs)| gs.iter().map(move |g| (r, g.x, g.y, g.w)))
+            .collect()
     }
 
     /// 调试：把终端纹理读回并保存 PNG（人工检查字形）。

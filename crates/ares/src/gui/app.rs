@@ -1985,7 +1985,9 @@ impl eframe::App for GuiApp {
                     let n = ws.sessions.len();
                     if n == 1 {
                         // 单 pane：尺寸变化 → resize 会话
-                        let (rows, cols) = term::size_for(ui, &mono_font(self.font_size));
+                        let (cell_w, cell_h) =
+                            crate::gui::gpu::fonts::FontSet::ideal_cell_size(self.font_size);
+                        let (rows, cols) = term::size_for(ui, cell_w, cell_h);
                         if self.last_size != Some((rows, cols))
                             && self.last_resize.elapsed() > std::time::Duration::from_millis(150)
                         {
@@ -2088,7 +2090,9 @@ impl eframe::App for GuiApp {
                                 } else {
                                     0.0
                                 })));
-                            let (rows, cols) = term::size_for(&child, &mono_font(self.font_size));
+                            let (cell_w, cell_h) =
+                                crate::gui::gpu::fonts::FontSet::ideal_cell_size(self.font_size);
+                            let (rows, cols) = term::size_for(&child, cell_w, cell_h);
                             if ws.last_sizes[i] != Some((rows, cols))
                                 && self.last_resize.elapsed()
                                     > std::time::Duration::from_millis(150)

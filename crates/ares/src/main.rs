@@ -364,4 +364,180 @@ mod gpu_stress_tests {
         );
         eprintln!("resize ok");
     }
+
+    // ── 位置断言（CJK 网格对齐，2026-08-06 架构修复）──
+
+    /// 建立独立渲染器（每个测试独立，避免行缓存串扰）。
+    fn make_renderer() -> (GpuTerminalRenderer, egui_wgpu::Renderer) {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::default());
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            compatible_surface: None,
+            force_fallback_adapter: false,
+        }))
+        .expect("no adapter");
+        let (device, queue) = pollster::block_on(adapter.request_device(
+            &wgpu::DeviceDescriptor {
+                label: Some("grid-test"),
+                required_features: wgpu::Features::empty(),
+                required_limits: wgpu::Limits::default(),
+                memory_hints: wgpu::MemoryHints::default(),
+            },
+            None,
+        ))
+        .expect("no device");
+        let device = std::sync::Arc::new(device);
+        let queue = std::sync::Arc::new(queue);
+        let egui_renderer =
+            egui_wgpu::Renderer::new(&device, wgpu::TextureFormat::Rgba8UnormSrgb, None, 1, false);
+        let gpu = GpuTerminalRenderer::new(device, queue, 2.0);
+        (gpu, egui_renderer)
+    }
+
+    /// 渲染一行文本 → 返回字形 (x, y, w)（过滤背景/光标等 y≈0 的 quad）。
+    fn render_line_text(text: &str) -> Vec<(f32, f32, f32)> {
+        let (mut gpu, mut egui_renderer) = make_renderer();
+        let theme = crate::gui::themes::builtin_themes()
+            .into_iter()
+            .find(|t| t.name == "Default")
+            .expect("Default theme");
+        let mut p = vt100::Parser::new(24, 80, 10000);
+        p.process(text.as_bytes());
+        p.process(b"\r\n");
+        let screen = p.screen().clone();
+        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(640.0, 432.0));
+        let _ = gpu.render(
+            &screen,
+            &theme,
+            None,
+            "block",
+            false,
+            rect,
+            &mut egui_renderer,
+        );
+        gpu.test_glyphs()
+            .into_iter()
+            .filter(|(_, _, y, _)| *y > 0.5) // 跳过背景/光标 quad
+            .map(|(_, x, y, w)| (x, y, w))
+            .collect()
+    }
+
+    /// 渲染一行带选区的文本 → 返回所有 quad（含背景，用于背景宽度断言）。
+    fn render_line_with_selection(text: &str) -> Vec<(f32, f32, f32)> {
+        let (mut gpu, mut egui_renderer) = make_renderer();
+        let theme = crate::gui::themes::builtin_themes()
+            .into_iter()
+            .find(|t| t.name == "Default")
+            .expect("Default theme");
+        let mut p = vt100::Parser::new(24, 80, 10000);
+        p.process(text.as_bytes());
+        p.process(b"\r\n");
+        let screen = p.screen().clone();
+        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(640.0, 432.0));
+        let sel = crate::gui::term::SelectRange::normalized(0, 0, 0, 40);
+        let _ = gpu.render(
+            &screen,
+            &theme,
+            Some(&sel),
+            "block",
+            false,
+            rect,
+            &mut egui_renderer,
+        );
+        gpu.test_glyphs()
+            .into_iter()
+            .map(|(_, x, y, w)| (x, y, w))
+            .collect()
+    }
+
+    /// 通用网格断言：每个字形必须落在 累计列 × cell_w 的 slot 内
+    /// （字形在 slot 内居中，允许 ±1.5 偏移；不允许累积漂移到邻格）。
+    /// 空格无字形（raster 位图 w=0 跳过，正确行为）：占位累计但不断言。
+    fn assert_grid_aligned(text: &str, cell_w: f32) {
+        use unicode_width::UnicodeWidthChar;
+        let glyphs = render_line_text(text);
+        let mut col = 0f32;
+        let mut chars = text.chars();
+        for (x, _, _) in glyphs {
+            let mut ch = chars.next().expect("glyph 数超过文本字符数");
+            while ch == ' ' {
+                col += 1.0;
+                ch = chars.next().expect("glyph 数超过文本字符数");
+            }
+            let w_cells = ch.width().unwrap_or(1).max(1) as f32;
+            let slot_start = col * cell_w;
+            let slot_end = (col + w_cells) * cell_w;
+            assert!(
+                x >= slot_start - 1.5 && x < slot_end + 1.5,
+                "字符 {ch:?} 落在 x={x}，期望 slot [{slot_start},{slot_end})（列 {col}）—— 网格错位"
+            );
+            col += w_cells;
+        }
+    }
+
+    /// 1. CJK 累积不错位（最关键）：“总用量 4” 的 '4' 必须落在第 7 列
+    ///    （总/用/量 各 2 列 + 空格 1 列 = 7）。
+    #[test]
+    fn cjk_does_not_drift() {
+        let cell_w = 8.0; // 640/80
+        assert_grid_aligned("总用量 4", cell_w);
+        // 显式断言 '4' 的列：渲染 "总用量 4"，最后一个字形应落在 7×cell_w
+        let glyphs = render_line_text("总用量 4");
+        let four = glyphs.last().expect("应有字形");
+        assert!(
+            (four.0 - 7.0 * cell_w).abs() < 1.5,
+            "'4' 落在 x={}，期望 {}（CJK 累积错位）",
+            four.0,
+            7.0 * cell_w
+        );
+    }
+
+    /// 2. 中英混排每个字符都在自己的列上：a中b文c → [0, 1, 3, 4, 6]
+    #[test]
+    fn mixed_cjk_ascii_grid_aligned() {
+        let cell_w = 8.0;
+        let glyphs = render_line_text("a中b文c");
+        let expect_cols = [0.0f32, 1.0, 3.0, 4.0, 6.0];
+        assert_eq!(glyphs.len(), expect_cols.len(), "字形数应与字符数一致");
+        for (g, col) in glyphs.iter().zip(expect_cols) {
+            assert!(
+                (g.0 - col * cell_w).abs() < 1.5,
+                "字符落在 x={}，期望列 {col} 的 x={}",
+                g.0,
+                col * cell_w
+            );
+        }
+    }
+
+    /// 3. 宽字符背景/选区宽度是 2 格
+    #[test]
+    fn wide_char_background_spans_two_cells() {
+        let cell_w = 8.0;
+        let quads = render_line_with_selection("中");
+        // 选区反色背景 quad：y=0 且宽度 ≈ 2×cell_w
+        let bg = quads
+            .iter()
+            .find(|(_, y, _)| *y == 0.0 && quads.iter().filter(|q| q.1 == 0.0).count() == 1)
+            .unwrap_or(&(0.0, 0.0, 0.0));
+        // 找 y==0 的 quad 中宽度最大的（即背景）
+        let bg_w = quads
+            .iter()
+            .filter(|(_, y, _)| *y == 0.0)
+            .map(|(_, _, w)| *w)
+            .fold(0.0f32, f32::max);
+        assert!(
+            (bg_w - 2.0 * cell_w).abs() < 1.5,
+            "宽字符背景宽 {bg_w}，期望 {}（2 格）",
+            2.0 * cell_w
+        );
+        let _ = bg;
+    }
+
+    /// 4. 回归护栏：真实 ll 输出行（截图），逐字符列位置必须对齐网格
+    #[test]
+    fn real_ll_output_grid_aligned() {
+        let cell_w = 8.0;
+        let text = "-rw-------. 1 root root 1869 8月  6 13:39 anaconda-ks.cfg";
+        assert_grid_aligned(text, cell_w);
+    }
 }
