@@ -21,6 +21,10 @@ pub struct GuiSettings {
     pub undecorated: bool,
     /// 终端背景图路径（空 = 无）
     pub background_image: String,
+    /// 光标样式：block / beam / underline。
+    pub cursor_style: String,
+    /// 光标闪烁。
+    pub cursor_blink: bool,
 }
 
 impl Default for GuiSettings {
@@ -32,6 +36,8 @@ impl Default for GuiSettings {
             hide_tabs: true,
             undecorated: false,
             background_image: String::new(),
+            cursor_style: "block".into(),
+            cursor_blink: false,
         }
     }
 }

@@ -115,6 +115,8 @@ pub fn draw_terminal(
     font: FontId,
     theme: &Theme,
     selection: Option<&SelectRange>,
+    cursor_style: &str,
+    cursor_blink: bool,
 ) -> (u16, u16) {
     let (rows, cols) = screen.size();
     let painter = ui.painter();
@@ -140,19 +142,49 @@ pub fn draw_terminal(
         draw_row(painter, screen, r, cols, &lay, theme, selection);
     }
 
-    // 光标：主题色反色块
+    // 光标（M3）：block / beam / underline，可选闪烁（0.5s 周期）
     let (cr, cc) = cursor;
     if cr < rows && cc < cols {
-        let pos = pos2(origin.x + cc as f32 * cell_w, origin.y + cr as f32 * cell_h);
-        if let Some(cell) = screen.cell(cr, cc) {
-            let fg = fg_color(cell.fgcolor(), theme);
-            painter.rect_filled(Rect::from_min_size(pos, Vec2::new(cell_w, cell_h)), 0.0, fg);
-        } else {
-            painter.rect_filled(
-                Rect::from_min_size(pos, Vec2::new(cell_w, cell_h)),
-                0.0,
-                theme.cursor,
-            );
+        let blink_off = cursor_blink && (ui.input(|i| i.time) as u64) % 2 == 1;
+        if !blink_off {
+            let pos = pos2(origin.x + cc as f32 * cell_w, origin.y + cr as f32 * cell_h);
+            let cursor_color = theme.cursor;
+            match cursor_style {
+                "beam" => {
+                    painter.rect_filled(
+                        Rect::from_min_size(pos, Vec2::new(2.0, cell_h)),
+                        0.0,
+                        cursor_color,
+                    );
+                }
+                "underline" => {
+                    painter.rect_filled(
+                        Rect::from_min_size(
+                            pos + egui::vec2(0.0, cell_h - 2.0),
+                            Vec2::new(cell_w, 2.0),
+                        ),
+                        0.0,
+                        cursor_color,
+                    );
+                }
+                _ => {
+                    // block：主题色反色块
+                    if let Some(cell) = screen.cell(cr, cc) {
+                        let fg = fg_color(cell.fgcolor(), theme);
+                        painter.rect_filled(
+                            Rect::from_min_size(pos, Vec2::new(cell_w, cell_h)),
+                            0.0,
+                            fg,
+                        );
+                    } else {
+                        painter.rect_filled(
+                            Rect::from_min_size(pos, Vec2::new(cell_w, cell_h)),
+                            0.0,
+                            cursor_color,
+                        );
+                    }
+                }
+            }
         }
     }
 

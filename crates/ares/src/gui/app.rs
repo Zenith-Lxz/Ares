@@ -1096,6 +1096,10 @@ fn sftp_ui(rt: &tokio::runtime::Runtime, ui: &mut egui::Ui, p: &mut SftpPanel) {
 
 impl eframe::App for GuiApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // 光标闪烁：持续请求重绘（0.5s 周期）
+        if self.settings.cursor_blink {
+            ctx.request_repaint_after(std::time::Duration::from_millis(500));
+        }
         // 数据驱动重画：读线程有新数据时调用 ctx.request_repaint()，
         // 静止时 egui 不重画（画面保留、CPU 为零）
         self.egui_ctx = Some(ctx.clone());
@@ -1726,6 +1730,8 @@ impl eframe::App for GuiApp {
                             mono_font(self.font_size),
                             &cur_theme,
                             ws.selection.as_ref(),
+                            &self.settings.cursor_style,
+                            self.settings.cursor_blink,
                         );
                         // 鼠标交互：拖选复制 + 点击清焦点（M2）
                         let tr = ui.available_rect_before_wrap();
@@ -1788,6 +1794,8 @@ impl eframe::App for GuiApp {
                                 mono_font(self.font_size),
                                 &cur_theme,
                                 sel,
+                                &self.settings.cursor_style,
+                                self.settings.cursor_blink,
                             );
                         }
                         // 分割线
@@ -2312,6 +2320,34 @@ impl eframe::App for GuiApp {
                                 .changed()
                             {
                                 self.settings.font_size = self.font_size;
+                                self.settings.save();
+                            }
+                            ui.end_row();
+                            ui.label("光标样式");
+                            ui.horizontal(|ui| {
+                                ui.selectable_value(
+                                    &mut self.settings.cursor_style,
+                                    "block".into(),
+                                    "▮ 块",
+                                );
+                                ui.selectable_value(
+                                    &mut self.settings.cursor_style,
+                                    "beam".into(),
+                                    "▏竖线",
+                                );
+                                ui.selectable_value(
+                                    &mut self.settings.cursor_style,
+                                    "underline".into(),
+                                    "▁ 下划线",
+                                );
+                                if ui
+                                    .checkbox(&mut self.settings.cursor_blink, "闪烁")
+                                    .changed()
+                                {
+                                    self.settings.save();
+                                }
+                            });
+                            if self.settings.cursor_style != "block" || self.settings.cursor_blink {
                                 self.settings.save();
                             }
                             ui.end_row();
