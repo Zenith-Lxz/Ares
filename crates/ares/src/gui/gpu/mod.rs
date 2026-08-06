@@ -378,6 +378,23 @@ impl GpuTerminalRenderer {
                 // 粗体提亮
                 fg = brighten(fg, 1.25);
             }
+            // 空 cell（滚动视图行首/行尾、宽字符间隙）：不收集字形段。
+            // 若反色/选区产生了背景（块光标在空格处、选区空格），单独补背景 quad，
+            // 避免行首空段把后续内容 x 拉到 0（滚动视图行尾碎片重叠 bug）。
+            if contents.is_empty() {
+                if let Some(b) = bg {
+                    out.push(RowGlyph {
+                        x: c as f32 * cell_w,
+                        y: 0.0,
+                        w: cell_w,
+                        h: cell_h,
+                        uv: self.white_px,
+                        color: to_rgba(b),
+                    });
+                }
+                c += 1;
+                continue;
+            }
             let kind = self.fonts.char_kind(contents.chars().next().unwrap_or(' '));
             let prev = segs.last_mut();
             if let Some(p) = prev {

@@ -157,6 +157,7 @@ impl Session {
             let parser = Arc::clone(&parser);
             let exited = Arc::clone(&exited);
             let connected = Arc::clone(&connected);
+            let scroll = Arc::clone(&scroll);
             std::thread::spawn(move || {
                 let mut buf = [0u8; 8192];
                 loop {
@@ -177,6 +178,10 @@ impl Session {
                                 clen += 1;
                             }
                             parser.lock().unwrap().process(&cooked[..clen]);
+                            // 新输出到达 → 回到底部（主流终端行为；否则滚动查看时
+                            // 新输出继续写入滚动视图外，用户看到"框死/输入不跟手"）
+                            parser.lock().unwrap().set_scrollback(0);
+                            *scroll.lock().unwrap() = 0;
                             // Kitty 图形协议解析（M6）：
                             // （vt100 忽略未知 OSC，解析独立于渲染管线）
                             parse_kitty_images(&buf[..n], &parser, &images_r, &mut kitty_b64);
