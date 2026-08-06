@@ -289,7 +289,7 @@ impl GuiApp {
         let theme_name = settings.theme_name.clone();
         let font_size = settings.font_size;
         let (agent_tx, agent_rx) = std::sync::mpsc::channel();
-        Self {
+        let mut app = Self {
             theme,
             theme_name,
             font_size,
@@ -335,7 +335,9 @@ impl GuiApp {
             theme_msg: None,
             bg_texture: None,
             bg_loaded: None,
-        }
+        };
+        app.restore_layout();
+        app
     }
 
     /// 打开一个会话 tab（主机簿条目 → 连接参数）。
@@ -388,6 +390,7 @@ impl GuiApp {
             }
             Err(e) => eprintln!("无法打开 {key}：{e}"),
         }
+        self.save_layout();
     }
 
     /// 面板背景色：主题 bg 向黑方向压暗（沉浸式跟随主题）。
@@ -428,6 +431,53 @@ impl GuiApp {
         }
         self.tabs.push(Tab::Picker);
         self.active = self.tabs.len() - 1;
+    }
+
+    /// 保存会话布局（M7）：终端 tab 的主机 + 分屏方向。
+    fn save_layout(&self) {
+        let mut tabs = Vec::new();
+        for t in &self.tabs {
+            if let Tab::Term(ws) = t {
+                let host = ws.sessions[0].alias.clone();
+                let split = match ws.split {
+                    Some(crate::gui::app::Split::Vertical) => Some("v".into()),
+                    Some(crate::gui::app::Split::Horizontal) => Some("h".into()),
+                    None => None,
+                };
+                tabs.push(crate::gui::layout::LayoutTab { host, split });
+            }
+        }
+        if tabs.is_empty() {
+            return;
+        }
+        crate::gui::layout::LayoutFile {
+            tabs,
+            active: self.active,
+        }
+        .save();
+    }
+
+    /// 恢复会话布局（M7）：启动时重建终端 tab（含分屏）。
+    fn restore_layout(&mut self) {
+        let Some(layout) = crate::gui::layout::LayoutFile::load() else {
+            return;
+        };
+        let mut restored = 0usize;
+        for t in layout.tabs {
+            if !self.hosts.contains_key(&t.host) {
+                continue; // 主机已删除/不存在
+            }
+            match t.split.as_deref() {
+                Some("h") => self.split_pending = Some(Split::Horizontal),
+                Some(_) => self.split_pending = Some(Split::Vertical),
+                None => self.split_pending = None,
+            }
+            self.open_tab(&t.host);
+            restored += 1;
+        }
+        if restored > 0 && layout.active < self.tabs.len() {
+            self.active = layout.active;
+        }
     }
 
     /// 重连当前 tab：关闭后按同主机名重新打开（需在主机簿中）。
@@ -530,6 +580,7 @@ impl GuiApp {
         if self.tabs.is_empty() {
             return;
         }
+        self.save_layout();
         // 分屏 tab：先关 pane；只剩一个 pane 时正常关 tab
         if let Some(Tab::Term(ws)) = self.tabs.get_mut(self.active) {
             if ws.sessions.len() > 1 {
@@ -545,6 +596,7 @@ impl GuiApp {
             self.agent = None;
             self.open_picker();
         }
+        self.save_layout();
     }
 
     /// 转发输入事件到当前会话（拦截全局快捷键）。
@@ -1121,6 +1173,10 @@ fn sftp_ui(rt: &tokio::runtime::Runtime, ui: &mut egui::Ui, p: &mut SftpPanel) {
 }
 
 impl eframe::App for GuiApp {
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.save_layout();
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // 光标闪烁：持续请求重绘（0.5s 周期）
         if self.settings.cursor_blink {
