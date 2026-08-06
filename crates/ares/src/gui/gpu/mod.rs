@@ -129,7 +129,7 @@ impl GpuTerminalRenderer {
         let mut atlas = GlyphAtlas::new(&device, 2048);
         // 预置 1x1 白像素（背景 quad 采样）
         let white_rect = atlas
-            .get_or_insert(0, 0, 1, 1, &[255, 255, 255, 255])
+            .get_or_insert(0, 0, 0, 1, 1, &[255, 255, 255, 255])
             .unwrap();
         let white_uv = atlas::rect_to_uv(&white_rect, 2048.0);
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -359,21 +359,13 @@ impl GpuTerminalRenderer {
                 b => Some(color_of(b, theme)),
             };
             if is_cursor_row && c == cursor.1 && cursor_style == "block" && !blink_off {
-                std::mem::swap(&mut fg, bg.get_or_insert(theme.cursor));
-                // 反色：fg=原 bg，bg=原 fg
-                if let Some(b) = &mut bg {
-                    *b = color_of(cell.fgcolor(), theme);
-                }
-                if bg.is_none() {
-                    bg = Some(color_of(cell.fgcolor(), theme));
-                }
-                fg = color_of(
-                    match cell.bgcolor() {
-                        vt100::Color::Default => vt100::Color::Default,
-                        b => b,
-                    },
-                    theme,
-                );
+                // 块光标反色：字符 = 原背景色（Default → 终端底色），块底 = 原前景色
+                let orig_bg = match cell.bgcolor() {
+                    vt100::Color::Default => theme.bg,
+                    b => color_of(b, theme),
+                };
+                fg = orig_bg;
+                bg = Some(color_of(cell.fgcolor(), theme));
             }
             if is_selected {
                 // 选区反色
@@ -473,23 +465,27 @@ impl GpuTerminalRenderer {
             _ => (FONT_FIRA, Some(&self.fonts.fira_swash)),
         };
         let Some(swash_font) = swash_font else { return };
+        let y_base = self.fonts.baseline_ratio(s.kind) * cell_h;
         let mut x = s.start as f32 * cell_w;
         for (gid, advance) in glyphs {
             let w_px = advance as f32 * scale_px;
             if w_px <= 0.0 {
                 continue;
             }
-            if let Some((gw, gh, rgba)) = raster_glyph(&mut self.raster, swash_font, gid, px) {
-                if let Some(rect) = self.atlas.get_or_insert(font_id, gid, gw, gh, &rgba) {
+            // 真实位图尺寸 + placement 偏移（不拉伸，字形原样绘制）
+            if let Some((gw, gh, lx, ty, rgba)) =
+                raster_glyph(&mut self.raster, swash_font, gid, px)
+            {
+                if let Some(rect) = self
+                    .atlas
+                    .get_or_insert(font_id, gid, px as u32, gw, gh, &rgba)
+                {
                     let uv = atlas::rect_to_uv(&rect, 2048.0);
-                    // 按 cell 高度缩放绘制（位图可能稍大/小）
-                    let draw_h = cell_h;
-                    let draw_w = (w_px / self.scale).max(1.0);
                     out.push(RowGlyph {
-                        x,
-                        y: 0.0,
-                        w: draw_w,
-                        h: draw_h,
+                        x: x + lx as f32 / self.scale,
+                        y: y_base + ty as f32 / self.scale,
+                        w: gw as f32 / self.scale,
+                        h: gh as f32 / self.scale,
                         uv,
                         color: to_rgba(s.fg),
                     });
@@ -533,13 +529,18 @@ impl GpuTerminalRenderer {
                         .chunks(4)
                         .flat_map(|p| [p[0], p[1], p[2], p[3]])
                         .collect();
-                    if let Some(rect) = self.atlas.get_or_insert(FONT_EMOJI, gid, gw, gh, &rgba) {
+                    if let Some(rect) = self
+                        .atlas
+                        .get_or_insert(FONT_EMOJI, gid, px as u32, gw, gh, &rgba)
+                    {
                         let uv = atlas::rect_to_uv(&rect, 2048.0);
+                        // 按位图真实尺寸绘制（不拉伸），垂直按基线对齐
+                        let y_base = cell_h * 0.78;
                         out.push(RowGlyph {
-                            x,
-                            y: 0.0,
-                            w: cell_w,
-                            h: cell_h,
+                            x: x + bitmap.placement.left as f32 / self.scale,
+                            y: y_base + bitmap.placement.top as f32 / self.scale,
+                            w: gw as f32 / self.scale,
+                            h: gh as f32 / self.scale,
                             uv,
                             color: [1.0, 1.0, 1.0, 1.0],
                         });
@@ -615,13 +616,13 @@ fn row_hash(
     h.finish()
 }
 
-/// swash 灰度字形 → RGBA 位图（白字 + coverage alpha）。
+/// swash 灰度字形 → RGBA 位图（白字 + coverage alpha）+ 位图偏移。
 fn raster_glyph(
     ctx: &mut swash::scale::ScaleContext,
     font: &swash::FontRef,
     glyph_id: u16,
     px: f32,
-) -> Option<(u32, u32, Vec<u8>)> {
+) -> Option<(u32, u32, i32, i32, Vec<u8>)> {
     let mut scaler = ctx.builder(*font).size(px).build();
     let render = swash::scale::Render::new(&[swash::scale::Source::Outline]);
     let image = render.render(&mut scaler, glyph_id)?;
@@ -633,16 +634,16 @@ fn raster_glyph(
     for &cov in image.data.iter() {
         rgba.extend_from_slice(&[255, 255, 255, cov]);
     }
-    Some((w, h, rgba))
+    Some((w, h, image.placement.left, image.placement.top, rgba))
 }
 
 /// 压入一个 quad 的 4 个顶点（NDC 转换）。
 fn push_quad(verts: &mut Vec<Vert>, g: &RowGlyph, phys_w: u32, phys_h: u32, scale: f32) {
-    // 逻辑像素 → 物理像素 → NDC
-    let x0 = g.x * scale; // 相对区域原点（逻辑 → 物理）
-    let y0 = g.y * scale;
-    let w = g.w * scale;
-    let h = g.h * scale;
+    // 逻辑像素 → 物理像素（对齐整数像素，消除字形模糊）→ NDC
+    let x0 = (g.x * scale).round();
+    let y0 = (g.y * scale).round();
+    let w = (g.w * scale).round();
+    let h = (g.h * scale).round();
     let nx0 = x0 / phys_w as f32 * 2.0 - 1.0;
     let nx1 = (x0 + w) / phys_w as f32 * 2.0 - 1.0;
     let ny0 = 1.0 - y0 / phys_h as f32 * 2.0;

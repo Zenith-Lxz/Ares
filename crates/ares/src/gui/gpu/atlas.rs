@@ -11,8 +11,9 @@ pub struct GlyphAtlas {
     pub view: wgpu::TextureView,
     pub sampler: wgpu::Sampler,
     allocator: AtlasAllocator,
-    /// (font_id, glyph_id) → 打包分配
-    cache: HashMap<(u32, u16), AllocId>,
+    /// (font_id, glyph_id, px) → 打包分配（px=栅格化字号，不同字号独立缓存，
+    /// 避免窗口 resize 后旧尺寸位图被拉伸导致字形扭曲）
+    cache: HashMap<(u32, u16, u32), AllocId>,
     /// 待上传：x, y, w, h, rgba
     dirty: Vec<(u32, u32, u32, u32, Vec<u8>)>,
 }
@@ -57,11 +58,12 @@ impl GlyphAtlas {
         &mut self,
         font_id: u32,
         glyph_id: u16,
+        px: u32,
         w: u32,
         h: u32,
         rgba: &[u8],
     ) -> Option<ERect> {
-        let key = (font_id, glyph_id);
+        let key = (font_id, glyph_id, px);
         if let Some(id) = self.cache.get(&key) {
             return Some(self.allocator.get(*id));
         }

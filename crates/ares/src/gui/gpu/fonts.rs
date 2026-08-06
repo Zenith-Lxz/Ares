@@ -90,6 +90,26 @@ impl FontSet {
         FontKind::Cjk
     }
 
+    /// 基线在 cell 内的比例（ascent/(ascent+descent)），字形垂直定位用。
+    pub fn baseline_ratio(&self, kind: FontKind) -> f32 {
+        let m = match kind {
+            FontKind::Cjk => self.cjk_swash.as_ref().map(|f| f.metrics(&[])),
+            _ => Some(self.fira_swash.metrics(&[])),
+        };
+        match m {
+            Some(m) => {
+                let asc = m.ascent;
+                let desc = m.descent;
+                if asc - desc > 0.0 {
+                    asc / (asc - desc)
+                } else {
+                    0.8
+                }
+            }
+            None => 0.8,
+        }
+    }
+
     /// 文本段 shaping（连字等宽字体）；返回 (glyph_id, x_advance_units)。
     pub fn shape(&self, kind: FontKind, text: &str) -> Vec<(u16, i32)> {
         let Some(face) = self.face_for(kind) else {
