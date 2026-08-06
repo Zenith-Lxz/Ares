@@ -54,3 +54,4 @@ egui-wgpu = "0.30"
 [dev-dependencies]
 tempfile = "3"
 ares-audit.workspace = true
+pollster = "1.0.1"

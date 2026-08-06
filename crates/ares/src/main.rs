@@ -236,3 +236,102 @@ pub(crate) async fn build_agent(
         &entry.model,
     )?)
 }
+
+#[cfg(test)]
+mod gpu_stress_tests {
+    //! GPU 渲染回归测试：独立 wgpu 设备 + 各种屏幕内容 → render() 抓 panic。
+    //! `cargo test -p ares --bin ares gpu_stress -- --nocapture`
+
+    use crate::gui::gpu::GpuTerminalRenderer;
+
+    #[test]
+    fn render_all_content_types() {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::default());
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            compatible_surface: None,
+            force_fallback_adapter: false,
+        }))
+        .expect("no adapter");
+        let (device, queue) = pollster::block_on(adapter.request_device(
+            &wgpu::DeviceDescriptor {
+                label: Some("stress"),
+                required_features: wgpu::Features::empty(),
+                required_limits: wgpu::Limits::default(),
+                memory_hints: wgpu::MemoryHints::default(),
+            },
+            None,
+        ))
+        .expect("no device");
+        let device = std::sync::Arc::new(device);
+        let queue = std::sync::Arc::new(queue);
+        let mut egui_renderer =
+            egui_wgpu::Renderer::new(&device, wgpu::TextureFormat::Rgba8UnormSrgb, None, 1, false);
+        let mut gpu = GpuTerminalRenderer::new(device.clone(), queue.clone(), 2.0);
+        let theme = crate::gui::themes::builtin_themes()
+            .into_iter()
+            .find(|t| t.name == "Default")
+            .expect("Default theme");
+
+        let cases: Vec<String> = vec![
+            "hello world => != :: ## **".to_string(), // 连字
+            "🎉 🚀 🐳 😀".to_string(),                // emoji
+            "你好，世界 中文测试".to_string(),        // CJK
+            "\u{1b}[31mred\u{1b}[0m \u{1b}[38;5;208morange\u{1b}[0m".to_string(), // 256 色
+            "wide: ＡＢＣ".to_string(),               // 全角
+            "a".repeat(200),                          // 超长行
+            "\u{1b}[44mblue bg\u{1b}[0m \u{1b}[1mbold\u{1b}[0m \u{1b}[4munder\u{1b}[0m".to_string(),
+            "\u{1b}[2J\u{1b}[H".to_string(), // 清屏
+        ];
+        for (i, content) in cases.iter().enumerate() {
+            let mut p = vt100::Parser::new(24, 80, 10000);
+            p.set_scrollback(10000);
+            p.process(content.as_bytes());
+            p.process(b"\r\n");
+            let screen = p.screen().clone();
+            let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(640.0, 432.0));
+            let _ = gpu.render(
+                &screen,
+                &theme,
+                None,
+                "block",
+                false,
+                rect,
+                &mut egui_renderer,
+            );
+            let sel = crate::gui::term::SelectRange::normalized(0, 0, 2, 10);
+            let _ = gpu.render(
+                &screen,
+                &theme,
+                Some(&sel),
+                "beam",
+                true,
+                rect,
+                &mut egui_renderer,
+            );
+            let _ = gpu.render(
+                &screen,
+                &theme,
+                Some(&sel),
+                "underline",
+                true,
+                rect,
+                &mut egui_renderer,
+            );
+            eprintln!("case {i} ok");
+        }
+        // resize（target 重建路径）
+        let screen = vt100::Parser::new(24, 80, 10000).screen().clone();
+        let rect2 = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1200.0, 700.0));
+        let _ = gpu.render(
+            &screen,
+            &theme,
+            None,
+            "block",
+            false,
+            rect2,
+            &mut egui_renderer,
+        );
+        eprintln!("resize ok");
+    }
+}
