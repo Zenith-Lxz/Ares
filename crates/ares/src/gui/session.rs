@@ -71,7 +71,17 @@ impl Session {
         auth: &str,
     ) -> anyhow::Result<Self> {
         let mut cmd = CommandBuilder::new("ssh");
-        // 密码主机（vault）：SSH_ASKPASS 脚本从钥匙串读 ssh-pw:<alias>
+        // 强制远端 pty（-t）：否则远端 shell 非交互，忽略 stdin（输入无响应）
+        cmd.arg("-t");
+        // 连接健壮性（2026-08-06）：host key 首次确认不再卡 askpass 流程；
+        // ConnectTimeout 让不可达快速失败；ServerAliveInterval 保活
+        cmd.arg("-o");
+        cmd.arg("StrictHostKeyChecking=accept-new");
+        cmd.arg("-o");
+        cmd.arg("ConnectTimeout=10");
+        cmd.arg("-o");
+        cmd.arg("ServerAliveInterval=15");
+        // 密码主机（vault）：SSH_ASKPASS 脚本从本地加密 vault 读 ssh-pw:<alias>
         if auth == "password" {
             let script = write_askpass(alias)?;
             cmd.env("SSH_ASKPASS", script);
@@ -79,6 +89,11 @@ impl Session {
             cmd.env("DISPLAY", ":0");
             cmd.arg("-o");
             cmd.arg("NumberOfPasswordPrompts=1");
+            // 诊断日志（ssh -v 输出写文件，密码经 askpass 管道不落盘）
+            let log = ares_core::paths::data_dir().join(format!("ssh-debug-{alias}.log"));
+            cmd.arg("-E");
+            cmd.arg(log);
+            cmd.arg("-v");
         }
         if let Some(p) = target.port {
             if p != 22 {
