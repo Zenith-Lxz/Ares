@@ -306,7 +306,7 @@ fn draw_row(
             continue;
         }
         let pos = pos2(lay.origin.x + c as f32 * lay.cell_w, base_y);
-        let selected = selection.map_or(false, |s| s.contains(r, c));
+        let selected = selection.is_some_and(|s| s.contains(r, c));
         let bg = cell.bgcolor();
         if bg != vt100::Color::Default {
             painter.rect_filled(
@@ -342,7 +342,7 @@ fn draw_row(
     }
     for (start_col, text, fg) in segments {
         let pos = pos2(lay.origin.x + start_col as f32 * lay.cell_w, base_y);
-        draw_text_segment(painter, pos, &text, &lay, fg, ligs);
+        draw_text_segment(painter, pos, &text, lay, fg, ligs);
     }
 }
 
