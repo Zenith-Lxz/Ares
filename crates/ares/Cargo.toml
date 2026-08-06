@@ -28,7 +28,7 @@ ratatui = "0.29.0"
 crossterm = "0.29.0"
 nucleo = "0.5.0"
 portable-pty = "0.9.0"
-eframe = "0.30"
+eframe = { version = "0.30", features = ["wgpu"] }
 vt100 = "0.15"
 egui = "0.30"
 async-trait = "0.1.91"
@@ -44,6 +44,12 @@ image = { version = "0.25.6", default-features = false, features = ["png", "jpeg
 base64 = "0.23.1"
 rustybuzz = "0.20.1"
 fontdue = "0.9.4"
+swash = "0.2.10"
+etagere = "0.3.0"
+bytemuck = "1.25.2"
+font-kit = "0.14.3"
+wgpu = "23"
+egui-wgpu = "0.30"
 
 [dev-dependencies]
 tempfile = "3"

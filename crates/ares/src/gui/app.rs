@@ -240,6 +240,9 @@ pub struct GuiApp {
     font_size: f32,
     /// 连字引擎（M8：按 cell 高构建；字号变化时重建）
     ligatures: Option<crate::gui::ligatures::LigatureEngine>,
+    /// α 架构：wgpu 终端渲染器（ARES_RENDER=egui 时回退旧实现）
+    gpu: Option<crate::gui::gpu::GpuTerminalRenderer>,
+    gpu_egui_fallback: bool,
     /// 主题导入路径输入（.itermcolors）
     theme_import: String,
     theme_msg: Option<String>,
@@ -296,6 +299,8 @@ impl GuiApp {
             theme_name,
             font_size,
             ligatures: None,
+            gpu: None,
+            gpu_egui_fallback: std::env::var("ARES_RENDER").as_deref() == Ok("egui"),
             hosts,
             ssh_imports,
             tabs: Vec::new(),
@@ -1262,7 +1267,13 @@ impl eframe::App for GuiApp {
         self.save_layout();
     }
 
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        // α 架构：wgpu 渲染状态（自研终端渲染器共享设备/队列）
+        let wgpu_state = if self.gpu_egui_fallback {
+            None
+        } else {
+            frame.wgpu_render_state()
+        };
         // 光标闪烁：持续请求重绘（0.5s 周期）
         if self.settings.cursor_blink {
             ctx.request_repaint_after(std::time::Duration::from_millis(500));
@@ -1913,17 +1924,56 @@ impl eframe::App for GuiApp {
                             let im = ws.sessions[0].images.lock().unwrap();
                             im.iter().map(|g| (g.row, g.col, g.data.clone())).collect()
                         };
-                        term::draw_terminal(
-                            ui,
-                            &screen,
-                            mono_font(self.font_size),
-                            &cur_theme,
-                            ws.selection.as_ref(),
-                            &self.settings.cursor_style,
-                            self.settings.cursor_blink,
-                            &imgs,
-                            ligs,
-                        );
+                        let tr = ui.available_rect_before_wrap();
+                        // α 架构：wgpu GPU 渲染（无内联图片时；有图/分屏回退 egui）
+                        let mut gpu_drawn = false;
+                        if let Some(rs) = wgpu_state {
+                            if imgs.is_empty() {
+                                if self.gpu.is_none() {
+                                    self.gpu = Some(crate::gui::gpu::GpuTerminalRenderer::new(
+                                        rs.device.clone(),
+                                        rs.queue.clone(),
+                                        ui.ctx().pixels_per_point(),
+                                    ));
+                                }
+                                if let Some(g) = &mut self.gpu {
+                                    let mut egui_renderer = rs.renderer.write();
+                                    if let Some(tid) = g.render(
+                                        &screen,
+                                        &cur_theme,
+                                        ws.selection.as_ref(),
+                                        &self.settings.cursor_style,
+                                        self.settings.cursor_blink,
+                                        tr,
+                                        &mut egui_renderer,
+                                    ) {
+                                        ui.painter().image(
+                                            tid,
+                                            tr,
+                                            egui::Rect::from_min_max(
+                                                egui::pos2(0.0, 0.0),
+                                                egui::pos2(1.0, 1.0),
+                                            ),
+                                            Color32::WHITE,
+                                        );
+                                        gpu_drawn = true;
+                                    }
+                                }
+                            }
+                        }
+                        if !gpu_drawn {
+                            term::draw_terminal(
+                                ui,
+                                &screen,
+                                mono_font(self.font_size),
+                                &cur_theme,
+                                ws.selection.as_ref(),
+                                &self.settings.cursor_style,
+                                self.settings.cursor_blink,
+                                &imgs,
+                                ligs,
+                            );
+                        }
                         // 鼠标交互：拖选复制 + 点击清焦点（M2）
                         let tr = ui.available_rect_before_wrap();
                         let cell_w = ui.fonts(|f| f.glyph_width(&mono_font(self.font_size), 'M'));

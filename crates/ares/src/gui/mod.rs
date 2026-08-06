@@ -3,6 +3,7 @@
 pub mod app;
 pub mod approver;
 pub mod exec;
+pub mod gpu;
 pub mod layout;
 pub mod ligatures;
 pub mod plan_approver;

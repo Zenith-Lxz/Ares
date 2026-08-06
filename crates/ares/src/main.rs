@@ -56,6 +56,8 @@ fn run_gui() -> Result<()> {
     let rt = Arc::new(tokio::runtime::Runtime::new()?);
     let settings = crate::gui::settings::GuiSettings::load();
     let options = eframe::NativeOptions {
+        // α 架构：wgpu 渲染后端（自研终端渲染器用原生纹理合成）
+        renderer: eframe::Renderer::Wgpu,
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1080.0, 700.0])
             .with_min_inner_size([640.0, 400.0])
