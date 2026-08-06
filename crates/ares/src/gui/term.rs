@@ -298,7 +298,11 @@ fn draw_row(
             let fmt = |color: Color32, underline: bool| egui::text::TextFormat {
                 font_id: lay.font.clone(),
                 color,
-                underline: underline.then(|| egui::Stroke::new(1.0, link_col)),
+                underline: if underline {
+                    egui::Stroke::new(1.0, link_col)
+                } else {
+                    egui::Stroke::NONE
+                },
                 ..Default::default()
             };
             if s > 0 {
